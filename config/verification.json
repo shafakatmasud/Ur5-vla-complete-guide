@@ -3,7 +3,7 @@
   "current_setup_source": "/media/grasplab/ed18b0ca-2841-4109-a97f-532234a9abb5/physical-ur5-vla-implementation",
   "readme_identical": true,
   "files_verified_byte_identical": {
-    "README.md": "d5afb11b6b7442a7011bec39987a05b6454dab95887406a29bfc2bd6483117fe",
+    "README.md": "af4da35c5934226caed41dde496851844215f25e34ef90c800686b8a65865311",
     "scripts/cross_grid_results.py": "1d590cde4fea3a6b18ca08e824affd6ec983407b9539279a855425192e9a9e5e",
     "scripts/create_calibration_target.py": "4e31643bf5d16c0ce7fe33dadd456a6e07757b53fe0213217b0a7f865892b24e",
     "scripts/calibration_teleop.py": "26355313884978fc690a404bcacf2bdbe643936a127f5ac40ac1f8f88b993b6c",
@@ -430,5 +430,6 @@
     "adapted MoveIt launch"
   ],
   "separate_artifacts": "Raw datasets, trained models, calibration/evaluation data and large Isaac USD scene assets remain separate from the guide source.",
-  "checks": "82 existing non-hardware regression tests passed after restoring current operating code; no robot movement or training was started."
+  "checks": "82 existing non-hardware regression tests passed after restoring current operating code; no robot movement or training was started.",
+  "robot_connection_command_verified": "All three UR driver command examples match the live ur_control.launch.py process arguments, inspected read-only on 2026-10-26."
 }

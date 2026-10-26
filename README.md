@@ -182,9 +182,10 @@ current host and its package manifest; see the smoke-test limitations below.
 ### Robot network, External Control, and calibration
 
 Connect the robot control box and PC over Ethernet. Configure a unique PC
-address on the robot's subnet, matching the actual pendant network settings;
-the PC address has not been recorded here. Check the chosen interface and
-reachability with `ip -4 addr` and `ping -c 3 10.0.1.38`.
+address on the robot's subnet, matching the actual pendant network settings.
+The current driver uses robot address `10.0.1.38` and PC reverse address
+`10.0.1.42`. Check that this PC address is assigned to the chosen Ethernet
+interface with `ip -4 addr`, and check reachability with `ping -c 3 10.0.1.38`.
 
 Install the External Control URCap appropriate for the robot's PolyScope
 version, reboot as directed, configure its remote host as the PC's Ethernet
@@ -223,7 +224,12 @@ pendant speed, and an accessible emergency stop.
 
 ```bash
 ros2 launch ur_robot_driver ur_control.launch.py \
-  ur_type:=ur5 robot_ip:=10.0.1.38 launch_rviz:=false
+  ur_type:=ur5 \
+  robot_ip:=10.0.1.38 \
+  reverse_ip:=10.0.1.42 \
+  launch_rviz:=false \
+  initial_joint_controller:=forward_position_controller \
+  activate_joint_controller:=false
 ```
 
 If the extracted calibration exists, append
@@ -235,8 +241,9 @@ ros2 launch ur_moveit_config ur_moveit.launch.py \
   ur_type:=ur5 launch_rviz:=true launch_servo:=true
 ```
 
-The installed launch explicitly supports `launch_servo`. Switch the arm from
-trajectory execution to continuous Servo control, then start Servo:
+The installed MoveIt launch explicitly supports `launch_servo`. The driver
+command above initially leaves the forward-position controller inactive.
+Activate it for continuous Servo control, then start Servo:
 
 ```bash
 ros2 control switch_controllers \
@@ -442,7 +449,12 @@ ping -c 3 10.0.1.38
 
 ```bash
 ros2 launch ur_robot_driver ur_control.launch.py \
-  ur_type:=ur5 robot_ip:=10.0.1.38 launch_rviz:=false
+  ur_type:=ur5 \
+  robot_ip:=10.0.1.38 \
+  reverse_ip:=10.0.1.42 \
+  launch_rviz:=false \
+  initial_joint_controller:=forward_position_controller \
+  activate_joint_controller:=false
 ```
 
 Apply the calibration argument described above if the extracted calibration
