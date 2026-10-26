@@ -41,7 +41,7 @@ dataset_recorder:
     jpeg_quality: 90
     writer_queue_size: 60
 
-    # Binary IO gripper convention: 0.0 = closed, 1.0 = open.
+    # Pneumatic gripper convention: 0.0 = closed, 1.0 = open.
     # State is the last command confirmed successful by the UR SetIO service;
     # it is an estimate because this gripper has no position sensor.
     enable_gripper: true

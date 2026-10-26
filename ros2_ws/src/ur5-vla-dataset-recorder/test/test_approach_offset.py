@@ -68,8 +68,6 @@ def test_planner_applies_fade_and_still_validates_raw_carry(monkeypatch):
     planner.model = SimpleNamespace(translate=translate)
     class Future:
         def result(self):return SimpleNamespace(valid=True)
-        def done(self):return True
-        def cancelled(self):return False
         def add_done_callback(self, cb):cb(self)
     def validate(request):
         checked.append(request.robot_state.joint_state.position)

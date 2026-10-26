@@ -13,9 +13,7 @@ fi
 export UR5_RECORD_PREPARE_ONLY="$prepare_only"
 set +u
 source /opt/ros/humble/setup.bash
-if [[ -f "$project_root/hardware_ws/install/local_setup.bash" ]]; then
-  source "$project_root/hardware_ws/install/local_setup.bash"
-fi
+source "$project_root/hardware_ws/install/local_setup.bash"
 source "$project_root/ros2_ws/install/local_setup.bash"
 set -u
 export ROS_LOG_DIR="$project_root/data/dataset/staging/experiment_2_sort_fruits/setup/ros_logs"

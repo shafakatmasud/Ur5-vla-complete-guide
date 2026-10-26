@@ -478,18 +478,7 @@
       "src/lerobot/robots/lekiwi/lekiwi.py": "0417d987428baa3adfb1a9f080c2f4e457bc340666fbdfe2d4bc22f96c5e64aa"
     }
   },
-  "ur_moveit_launch_source": {
-    "upstream": "https://github.com/UniversalRobots/Universal_Robots_ROS2_Driver",
-    "installed_source_sha256": "fb77c7a7f0f448018fc521031485976a5133fe99acc8a4de379bd50664f19e24",
-    "adaptation": "Expose kinematics_params_file for the same factory calibration as the driver; original copyright and Apache header retained."
-  },
-  "guide_adaptations": [
-    "Standalone executor accepts an explicit checkpoint and ML Python path; no lab checkpoint path is required.",
-    "Environment helper resolves this repository and optional overlays instead of the previous workspace.",
-    "Generic training launcher validates the UR5 absolute-action contract and emits native LeRobot CLI commands.",
-    "Pi0 FSDP recipe accepts nonempty UR5 datasets and uses exactly two real camera features.",
-    "Added read-only taught-bowl capture, evaluation-session initialization, and a portable Colab notebook.",
-    "Kept tests for shipped components; adjusted the engine lock entrypoint test to the shipped engine and updated one resolved-future fixture.",
-    "Adapted the installed UR MoveIt launch to accept the same extracted factory calibration as the driver."
-  ]
+  "guide_adaptations": [],
+  "instruction_policy": "README.md is an exact byte-for-byte copy of the current local main README. Operational scripts retain their original names, commands, paths and defaults.",
+  "correction": "Removed the generalized environment, training launcher, executor flags and adapted MoveIt launch. Restored current operation and Pi0 launcher."
 }

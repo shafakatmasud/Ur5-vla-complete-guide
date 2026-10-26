@@ -24,7 +24,7 @@ def test_duplicate_owner_is_rejected_and_release_allows_restart(tmp_path):
 
 def test_engine_entrypoints_acquire_lock_before_ros_initialization():
     import ast
-    for name in ('control_engine.py',):
+    for name in ('control_engine.py', 'control_engine_phased.py'):
         tree = ast.parse((ROOT/'scripts'/name).read_text())
         main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'main')
         lock = next(n for n in ast.walk(main) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == 'acquire_engine_lock')

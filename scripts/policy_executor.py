@@ -14,7 +14,7 @@ from pathlib import Path
 
 from execution_profile import (DEFAULT_SPEED_SCALE, DEFAULT_ACTIONS_PER_PREDICTION,
                                validated_speed, validated_horizon, resolve_carry_lift_mm)
-from project_paths import MODELS, PACKAGE, inference_environment, model_python
+from project_paths import MODELS, PACKAGE, inference_environment
 
 sys.path.insert(0, str(PACKAGE))
 
@@ -31,6 +31,13 @@ from ur5_vla_dataset_recorder.core import UR5_JOINT_ORDER, reorder_joint_positio
 from ur5_vla_dataset_recorder.policy_executor import ShadowObservationBuffer
 from ur5_vla_dataset_recorder.shadow_protocol import request_prediction
 
+
+# Final 110-episode, 18,000-step SmolVLA checkpoint.
+MODEL_PATH = Path(
+    MODELS / "checkpoints" /
+    "ur5_cube_110ep_v3_smolvla_a100_b128_18000_steps_20261003_180950" /
+    "pretrained_model"
+)
 
 TASK = "Pick up the orange cube and place it in the bowl"
 INITIAL_GRIPPER = 1.0
@@ -634,9 +641,6 @@ def main():
                         help="new pickup trial: open gripper and confirm IO before inference; scene must be reset with no object held")
     parser.add_argument('--carry-lift-mm', type=float, default=None,
                         help='0-30 mm base-Z lift after stable closed IO; default 25 with continuous grasp offset, otherwise 0; use 0 to disable')
-    parser.add_argument("--checkpoint", type=Path, required=True, help="UR5-compatible pretrained_model directory")
-    parser.add_argument("--inference-python", type=Path, default=None, help="Python with LeRobot installed; default VLA_PYTHON")
-    parser.add_argument("--inference-device", choices=("cuda", "cpu"), default="cuda")
     args = parser.parse_args()
     args.task = args.task.strip()
     if not args.task:
@@ -676,12 +680,8 @@ def main():
         parser.error('--experiment-attempt requires --pickup-shift-file')
     elif args.unrecorded_repeat:
         parser.error('--unrecorded-repeat requires --pickup-shift-file and --experiment-attempt 13')
-    checkpoint = args.checkpoint.expanduser().resolve()
-    if not checkpoint.is_dir():
-        raise SystemExit(f"Checkpoint does not exist: {checkpoint}")
-    inference_python = args.inference_python or model_python()
-    if not inference_python.is_file():
-        raise SystemExit(f"Inference Python missing: {inference_python}; set VLA_PYTHON or --inference-python")
+    if not MODEL_PATH.is_dir():
+        raise SystemExit(f"MODEL_PATH does not exist: {MODEL_PATH}")
     from engine_readiness import require_ready_engine
     robot_description = require_ready_engine(
         prepare_episode=args.prepare_episode,
@@ -691,17 +691,22 @@ def main():
     )
     server = subprocess.Popen(
         [
-            str(inference_python),
+            "/home/grasplab/miniconda3/bin/conda",
+            "run",
+            "--no-capture-output",
+            "-n",
+            "pi0",
+            "python",
             "-m",
             "ur5_vla_dataset_recorder.policy_inference_server",
             "--checkpoint",
-            str(checkpoint),
+            str(MODEL_PATH),
             "--host",
             SERVER_HOST,
             "--port",
             str(SERVER_PORT),
             "--device",
-            args.inference_device,
+            "cuda",
         ],
         cwd=REPOSITORY,
         env=inference_environment(),

@@ -20,8 +20,3 @@ def inference_environment() -> dict[str, str]:
     environment["HF_HOME"] = str(HF_CACHE)
     environment["HF_LEROBOT_HOME"] = str(LEROBOT_CACHE)
     return environment
-
-
-def model_python() -> Path:
-    """Python environment used for LeRobot; ROS continues using system Python."""
-    return Path(os.environ.get("VLA_PYTHON", str(ROOT / ".venv-vla/bin/python"))).expanduser()
