@@ -1,0 +1,14 @@
+{
+  "date": "2026-10-26",
+  "hardware_motion_performed": false,
+  "training_started": false,
+  "syntax": "Application Python compilation, both shell scripts, 77 README bash blocks, and all notebook code cells passed.",
+  "ros_regression": "262 passed, 1 skipped, 1 stale mock failed initially; the mock was corrected and all 10 affected tests passed on rerun.",
+  "ml_regression": "6 shadow inference tests and all 10 LeRobot pipeline tests passed in the existing ML environment.",
+  "ci_subset": "90 tests passed without sourcing ROS.",
+  "recipes": "SmolVLA, Pi0, ACT and Diffusion commands parsed and validated against installed LeRobot configuration classes without starting training.",
+  "launch": "Adapted MoveIt launch --show-args parsed successfully; executor/engine --help parsed without starting nodes.",
+  "limitations": [
+    "Fresh environment installation, Colab execution, GPU training, and physical hardware operation were not performed for this publication."
+  ]
+}

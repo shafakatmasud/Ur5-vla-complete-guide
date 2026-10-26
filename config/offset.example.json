@@ -1,0 +1,6 @@
+{
+  "offset_frame": "base",
+  "offset_m": [0.001, 0.0, 0.0],
+  "example_only": true,
+  "note": "Example 1 mm along robot base +X. This does not establish table-forward or wrist-image direction. Create your own file under ignored data after measuring direction."
+}

@@ -1,0 +1,42 @@
+dataset_recorder:
+  ros__parameters:
+    recording_rate_hz: 20.0
+    output_root: data/dataset
+    base_image_topic: /base/camera/color/image_raw
+    wrist_image_topic: /wrist/camera/color/image_raw
+    enable_depth: true
+    base_depth_topic: /base/camera/aligned_depth_to_color/image_raw
+    wrist_depth_topic: /wrist/camera/aligned_depth_to_color/image_raw
+    depth_unit_m: 0.001
+    joint_state_topic: /joint_states
+    arm_command_topic: /forward_position_controller/commands
+    servo_status_topic: /servo_node/status
+    enable_joystick_episode_controls: true
+    joy_topic: /joy
+    start_episode_button_index: 8
+    abort_episode_button_index: 9
+    save_success_button_index: 10
+    command_joint_order:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+    require_servo_status_zero: true
+    max_joint_state_age_s: 0.1
+    max_action_age_s: 0.1
+    max_image_age_s: 0.1
+    max_depth_age_s: 0.1
+    minimum_free_disk_gb: 20.0
+    jpeg_quality: 90
+    writer_queue_size: 60
+    enable_gripper: true
+    gripper_state_topic: /gripper/state
+    gripper_command_topic: /gripper/command
+    task: Sort the fruits
+    episode_subdirectory: staging/experiment_2_sort_fruits/episodes
+    operator_note: 'Experiment 2: two apples and two cubes in the workspace. Pick
+      each apple one after another and place both in the bowl; leave both cubes outside.
+      One full two-apple sequence per episode. Button 9 starts, 10 aborts/discards,
+      11 saves success after both apples are placed.'

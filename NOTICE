@@ -1,0 +1,14 @@
+UR5 VLA complete guide
+
+Operational code derived from physical-ur5-vla-implementation, including
+ur5_vla_dataset_recorder (package metadata declares Apache-2.0).
+Original project: https://github.com/jawads12/physical-ur5-vla-implementation
+
+The vendored LeRobot source is from Hugging Face LeRobot, Apache-2.0.
+Upstream: https://github.com/huggingface/lerobot
+Vendor license and original source headers are retained in vendor/lerobot.
+See config/source_provenance.json for source snapshot file hashes.
+No training data, trained weights, factory arm calibration or credentials are included.
+
+The adapted ur5_moveit.launch.py is derived from the Universal Robots ROS 2
+driver MoveIt launch file, Apache-2.0; its original copyright header is retained.
