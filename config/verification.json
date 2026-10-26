@@ -10,5 +10,6 @@
   "launch": "Adapted MoveIt launch --show-args parsed successfully; executor/engine --help parsed without starting nodes.",
   "limitations": [
     "Fresh environment installation, Colab execution, GPU training, and physical hardware operation were not performed for this publication."
-  ]
+  ],
+  "github_actions": "Initial hosted run found OpenCV missing from CI dependencies; workflow now installs opencv-python-headless. Follow-up hosted run is the authoritative result."
 }
