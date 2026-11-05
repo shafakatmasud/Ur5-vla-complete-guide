@@ -1,0 +1,2146 @@
+NOTEBOOK CODE-CELL COMMAND REFERENCE
+Generated from the repository notebooks on 2026-11-05.
+Run these cells in their notebook runtime, in order; notebook variables and prior setup are required.
+This reference is not a standalone script. Embedded source archives remain in the linked notebook.
+The root README is the ordered operating guide. No authentication values are included.
+
+================================================================================
+notebooks/train_ur5_cube_110ep_v3_smolvla_a100_colab.ipynb
+================================================================================
+
+CODE CELL at notebook position 2
+------------------------------------------------------------
+# 1. Verify the assigned runtime before importing torch.
+import json, os, platform, subprocess, sys, time
+from pathlib import Path
+
+def output(command):
+    return subprocess.run(command, text=True, capture_output=True, check=False).stdout.strip()
+
+gpu_report = output(["nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits"])
+print(gpu_report)
+assert gpu_report, "No NVIDIA GPU assigned"
+gpu_name, memory_mib, driver = [item.strip() for item in gpu_report.split(",", 2)]
+assert "A100" in gpu_name, f"Expected an A100 runtime, received {gpu_name}"
+assert int(memory_mib) >= 38000, f"Expected the 40 GB A100, received {memory_mib} MiB"
+assert 'torch' not in sys.modules and 'torchvision' not in sys.modules, 'Start a fresh runtime before installing the pinned stack.'
+runtime_report = {"python": sys.version, "platform": platform.platform(), "gpu": gpu_name, "memory_mib": int(memory_mib), "driver": driver}
+print(json.dumps(runtime_report, indent=2))
+
+CODE CELL at notebook position 3
+------------------------------------------------------------
+# 2. Mount Drive and configure the new dataset.
+from google.colab import drive
+drive.mount('/content/drive')
+DRIVE_ROOT = Path('/content/drive/MyDrive/pHYSICAL UR5')
+DATASET_NAME = 'ur5_cube_110ep_v3'
+REPO_ID = f'local/{DATASET_NAME}'
+EXPECTED_EPISODES = 110
+EXPECTED_FRAMES = 285204
+TASK = 'Pick up the orange cube and place it in the bowl'
+TARGET_EPOCHS = 8.0
+USE_WANDB = True
+RUN_TAG = time.strftime('%Y%m%d_%H%M%S')
+DATASET_DRIVE_FOLDER = DRIVE_ROOT / 'datasets/lerobot' / DATASET_NAME
+DATASET_ARCHIVE = DRIVE_ROOT / 'datasets/lerobot' / f'{DATASET_NAME}.tar'
+DATASET_CHECKSUM = Path(f'{DATASET_ARCHIVE}.sha256')
+LOCAL_ARCHIVE = Path('/content') / DATASET_ARCHIVE.name
+LOCAL_DATASET = Path('/content') / DATASET_NAME
+CHECKPOINT_ROOT = DRIVE_ROOT / 'checkpoints/ur5_smolvla_trained'
+REPORT_ROOT = DRIVE_ROOT / 'reports/training'
+DEPLOYMENT_ROOT = DRIVE_ROOT / 'deployment/downloaded_checkpoints'
+assert DRIVE_ROOT.is_dir(), f'Drive root missing: {DRIVE_ROOT}'
+folder_upload = DATASET_DRIVE_FOLDER.is_dir()
+archive_upload = DATASET_ARCHIVE.is_file() and DATASET_CHECKSUM.is_file()
+assert folder_upload or archive_upload, f'Upload {DATASET_DRIVE_FOLDER}, or {DATASET_ARCHIVE} plus its .sha256 file'
+if folder_upload:
+    for name in ('data', 'meta', 'videos'):
+        assert (DATASET_DRIVE_FOLDER / name).is_dir(), f'Incomplete upload: missing {name}'
+for directory in (CHECKPOINT_ROOT, REPORT_ROOT, DEPLOYMENT_ROOT):
+    directory.mkdir(parents=True, exist_ok=True)
+print('Input:', DATASET_DRIVE_FOLDER if folder_upload else DATASET_ARCHIVE)
+print('Dataset:', EXPECTED_EPISODES, 'episodes;', EXPECTED_FRAMES, 'frames')
+print('W&B enabled:', USE_WANDB, '| Target dataset passes:', TARGET_EPOCHS)
+
+CODE CELL at notebook position 5
+------------------------------------------------------------
+# Install before importing Torch; do not replace libraries in an already-imported runtime.
+assert 'torch' not in sys.modules and 'torchvision' not in sys.modules, 'Disconnect and delete runtime, then run from Cell 1.'
+%pip install -q --upgrade pip
+%pip install -q --index-url https://download.pytorch.org/whl/cu126 "torch==2.7.1" "torchvision==0.22.1" "torchaudio==2.7.1"
+%pip install -q "lerobot[smolvla]==0.4.3" "av==15.1.0" "wandb>=0.19" psutil matplotlib num2words
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+import importlib.metadata as md, torch, torchvision
+assert torch.cuda.is_available()
+assert torch.__version__.startswith('2.7.1')
+assert torchvision.__version__.startswith('0.22.1')
+assert md.version('lerobot') == '0.4.3'
+assert torchvision.extension._has_ops()
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.set_float32_matmul_precision('high')
+runtime_report.update({'torch': torch.__version__, 'torchvision': torchvision.__version__, 'lerobot': md.version('lerobot'), 'cuda': torch.version.cuda})
+print(json.dumps(runtime_report, indent=2))
+
+CODE CELL at notebook position 6
+------------------------------------------------------------
+# 3. Copy to local disk, verify every copied file, and retain a fingerprint report.
+import hashlib, shutil, tarfile
+from pathlib import PurePosixPath
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        while chunk := stream.read(16 * 1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+def tree_hashes(root):
+    root = Path(root)
+    return {str(p.relative_to(root)): sha256_file(p) for p in sorted(root.rglob('*')) if p.is_file()}
+
+def copy_verified_tree(source, destination):
+    source, destination = Path(source), Path(destination)
+    before = tree_hashes(source)
+    assert before, f'No files in {source}'
+    if destination.exists():
+        assert tree_hashes(destination) == before, f'Destination exists with different content: {destination}'
+        return before
+    staging = destination.with_name('.' + destination.name + '.copying')
+    assert not staging.exists(), f'Partial copy exists: {staging}. Inspect it before retrying.'
+    shutil.copytree(source, staging)
+    assert tree_hashes(staging) == before, f'Copy checksum failed: {staging}'
+    assert tree_hashes(source) == before, f'Source changed during copy: {source}'
+    staging.rename(destination)
+    return before
+
+assert shutil.disk_usage('/content').free >= 35 * 1024**3, 'Need at least 35 GiB free local disk before staging/training.'
+if folder_upload:
+    print('Copying dataset folder; verifying SHA-256 of every file ...')
+    dataset_file_hashes = copy_verified_tree(DATASET_DRIVE_FOLDER, LOCAL_DATASET)
+else:
+    expected_sha = DATASET_CHECKSUM.read_text().split()[0].lower()
+    assert len(expected_sha) == 64 and all(c in '0123456789abcdef' for c in expected_sha)
+    if not LOCAL_ARCHIVE.exists():
+        shutil.copy2(DATASET_ARCHIVE, LOCAL_ARCHIVE)
+    assert sha256_file(LOCAL_ARCHIVE) == expected_sha, 'Archive SHA-256 mismatch'
+    assert not LOCAL_DATASET.exists(), f'Local dataset already exists: {LOCAL_DATASET}; inspect before extracting.'
+    staging = Path('/content') / ('.' + DATASET_NAME + '.extracting')
+    staging.mkdir(exist_ok=False)
+    with tarfile.open(LOCAL_ARCHIVE, 'r:*') as archive:
+        members = archive.getmembers()
+        for member in members:
+            relative = PurePosixPath(member.name)
+            assert relative.parts and relative.parts[0] == DATASET_NAME, f'Unexpected archive root: {member.name}'
+            assert not relative.is_absolute() and '..' not in relative.parts
+            assert member.isfile() or member.isdir(), f'Unsupported archive entry: {member.name}'
+        archive.extractall(staging, members=members, filter='data')
+    (staging / DATASET_NAME).rename(LOCAL_DATASET)
+    staging.rmdir()
+    dataset_file_hashes = tree_hashes(LOCAL_DATASET)
+EXPECTED_METADATA_SHA256 = {'meta/info.json': 'de71d93083204c98babf100c8331061badae2df7aa1a3bf23de5e8deecfa4fdf', 'meta/ur5_vla_conversion.json': 'eda8704603a39667c9b540b966cb8efdfee54e8b7d2ab4f34765ca24de592d21'}
+for relative, expected in EXPECTED_METADATA_SHA256.items():
+    assert sha256_file(LOCAL_DATASET / relative) == expected, f'Dataset metadata differs from the reviewed 110-episode artifact: {relative}'
+for name in ('data', 'meta', 'videos'):
+    assert (LOCAL_DATASET / name).is_dir(), f'Missing local {name}'
+DATASET_HASH_REPORT = Path('/content') / f'{DATASET_NAME}_file_hashes.json'
+DATASET_HASH_REPORT.write_text(json.dumps(dataset_file_hashes, indent=2))
+print('COPY VERIFIED:', len(dataset_file_hashes), 'files;', LOCAL_DATASET)
+
+CODE CELL at notebook position 7
+------------------------------------------------------------
+# 4. Validate all state/action rows and decode three paired video samples per episode.
+import numpy as np
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+dataset = LeRobotDataset(REPO_ID, root=LOCAL_DATASET, video_backend='pyav')
+assert dataset.meta.total_episodes == EXPECTED_EPISODES
+assert dataset.meta.total_frames == EXPECTED_FRAMES == len(dataset)
+assert dataset.meta.fps == 20
+assert list(dataset.meta.tasks.index) == [TASK]
+features = dataset.meta.features
+JOINT_ORDER = ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint']
+for key in ('observation.images.base', 'observation.images.wrist'):
+    assert features[key]['dtype'] == 'video' and tuple(features[key]['shape']) == (480, 640, 3)
+assert tuple(features['observation.state']['shape']) == (7,)
+assert tuple(features['action']['shape']) == (7,)
+assert features['observation.state']['names'] == JOINT_ORDER + ['estimated_gripper_state']
+assert features['action']['names'] == JOINT_ORDER + ['gripper_command']
+conversion = json.loads((LOCAL_DATASET / 'meta/ur5_vla_conversion.json').read_text())
+assert conversion['action_semantics'] == 'six absolute joint-position targets plus absolute binary gripper command'
+assert conversion['action_mode'] == 'absolute' and conversion['joint_unit'] == 'radian'
+assert conversion['joint_order'] == JOINT_ORDER
+assert conversion['gripper_closed_value'] == 0.0 and conversion['gripper_open_value'] == 1.0
+assert conversion['gripper_is_measured'] is False
+assert len(conversion['source_episode_names']) == len(set(conversion['source_episode_names'])) == EXPECTED_EPISODES
+assert not {'episode_20261001_175654', 'episode_20261001_182413'} & set(conversion['source_episode_names'])
+
+rows_checked, episode_ids = 0, set()
+vectors = dataset.hf_dataset.select_columns(['observation.state', 'action', 'episode_index', 'task_index'])
+for batch in vectors.iter(batch_size=8192):
+    state = np.asarray(batch['observation.state'], dtype=np.float32)
+    action = np.asarray(batch['action'], dtype=np.float32)
+    assert state.ndim == 2 and state.shape == action.shape and state.shape[1] == 7
+    assert np.isfinite(state).all() and np.isfinite(action).all()
+    for gripper in (state[:, 6], action[:, 6]):
+        assert np.all(np.minimum(np.abs(gripper), np.abs(gripper - 1)) < 1e-5)
+    assert np.all(np.asarray(batch['task_index']) == 0)
+    episode_ids.update(np.asarray(batch['episode_index']).reshape(-1).tolist())
+    rows_checked += len(state)
+assert rows_checked == EXPECTED_FRAMES and episode_ids == set(range(EXPECTED_EPISODES))
+
+sample_count = 0
+for ep in range(EXPECTED_EPISODES):
+    info = dataset.meta.episodes[ep]
+    start, stop = int(info['dataset_from_index']), int(info['dataset_to_index'])
+    assert 0 <= start < stop <= EXPECTED_FRAMES
+    for index in sorted({start, (start + stop - 1) // 2, stop - 1}):
+        sample = dataset[index]
+        for key in ('observation.images.base', 'observation.images.wrist'):
+            image = np.asarray(sample[key])
+            assert image.shape == (3, 480, 640) and np.isfinite(image).all()
+        sample_count += 1
+    if (ep + 1) % 10 == 0:
+        print(f'Video validation: {ep + 1}/{EXPECTED_EPISODES} episodes')
+validation_report = {'episodes': EXPECTED_EPISODES, 'frames': rows_checked, 'fps': 20, 'task': TASK, 'paired_video_samples': sample_count, 'action_mode': 'absolute', 'validation': 'PASS', 'held_out_split': False}
+print(json.dumps(validation_report, indent=2))
+Path('/content/dataset_validation.json').write_text(json.dumps(validation_report, indent=2))
+# Show representative paired inputs before training.
+import matplotlib.pyplot as plt
+fig, axes = plt.subplots(2, 2, figsize=(10, 7))
+for row, index in enumerate((0, EXPECTED_FRAMES - 1)):
+    sample = dataset[index]
+    for col, key in enumerate(('observation.images.base', 'observation.images.wrist')):
+        axes[row, col].imshow(np.asarray(sample[key]).transpose(1, 2, 0))
+        axes[row, col].set_title(f'{key.rsplit(".", 1)[-1]} — frame {index}')
+        axes[row, col].axis('off')
+plt.tight_layout(); plt.show()
+
+CODE CELL at notebook position 8
+------------------------------------------------------------
+# 5. W&B login uses its secure prompt; no credentials are saved in notebook source.
+WANDB_PROJECT = 'smolvla_ur5_cube_110ep_v3_a100'
+if USE_WANDB:
+    import wandb
+    wandb.login()
+print('W&B:', WANDB_PROJECT if USE_WANDB else 'disabled')
+
+CODE CELL at notebook position 10
+------------------------------------------------------------
+# 6. Benchmark stable batches and choose the fastest one within the memory reserve.
+import re, statistics, subprocess, threading
+
+BATCH_CANDIDATES = [16, 32, 48, 64, 96, 128]
+BENCHMARK_STEPS = 12
+NUM_WORKERS = max(1, min(12, (os.cpu_count() or 2) - 2))
+GPU_MEMORY_LIMIT_MIB = int(runtime_report["memory_mib"] * 0.88)
+BENCHMARK_ROOT = Path("/content") / f"{DATASET_NAME}_benchmarks_{RUN_TAG}"
+assert not BENCHMARK_ROOT.exists(), "Benchmark directory already exists; inspect before rerunning"
+BENCHMARK_ROOT.mkdir()
+
+def gpu_sample():
+    text = output(["nvidia-smi", "--query-gpu=memory.used,utilization.gpu", "--format=csv,noheader,nounits"])
+    memory, utilization = [int(float(value.strip())) for value in text.split(",")[:2]]
+    return memory, utilization
+
+def benchmark(batch_size):
+    run_dir = BENCHMARK_ROOT / f"batch_{batch_size}"
+    command = [
+        "lerobot-train", "--policy.type=smolvla", "--policy.pretrained_path=lerobot/smolvla_base",
+        "--policy.device=cuda", "--policy.use_amp=true", "--policy.push_to_hub=false",
+        f"--dataset.repo_id={REPO_ID}", f"--dataset.root={LOCAL_DATASET}", "--dataset.video_backend=pyav",
+        f"--batch_size={batch_size}", f"--num_workers={NUM_WORKERS}", "--seed=42",
+        "--wandb.enable=false", "--save_checkpoint=false", "--eval_freq=0",
+        f"--steps={BENCHMARK_STEPS}", "--log_freq=1", f"--output_dir={run_dir}", f"--job_name=a100_bench_b{batch_size}",
+    ]
+    samples, lines, stop = [], [], threading.Event()
+    def monitor():
+        while not stop.wait(0.25):
+            try: samples.append(gpu_sample())
+            except Exception: pass
+    thread = threading.Thread(target=monitor, daemon=True); thread.start()
+    started = time.time()
+    process = None
+    try:
+        process = subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1)
+        for line in process.stdout:
+            print(f"[batch {batch_size}] {line}", end="")
+            lines.append(line)
+        code = process.wait()
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill(); process.wait()
+        stop.set(); thread.join(timeout=2)
+        (BENCHMARK_ROOT / f"batch_{batch_size}.log").write_text("".join(lines))
+    text = "".join(lines)
+    update_times = [float(value) for value in re.findall(r"updt_s:\s*([0-9.]+)", text)]
+    stable_times = update_times[len(update_times)//2:]
+    peak_memory = max((item[0] for item in samples), default=0)
+    utilization_samples = [item[1] for item in samples]
+    median_util = statistics.median(utilization_samples) if utilization_samples else 0
+    throughput = batch_size / statistics.median(stable_times) if stable_times and code == 0 else 0.0
+    result = {"batch_size": batch_size, "success": code == 0, "peak_memory_mib": peak_memory, "median_gpu_utilization": median_util, "examples_per_second": throughput, "elapsed_s": time.time() - started}
+    if code != 0:
+        result["error_tail"] = "\n".join(text.splitlines()[-40:])
+    (BENCHMARK_ROOT / f"batch_{batch_size}.log").write_text(text)
+    shutil.rmtree(run_dir, ignore_errors=True)
+    return result
+
+benchmark_results = []
+for candidate in BATCH_CANDIDATES:
+    result = benchmark(candidate); benchmark_results.append(result); print(json.dumps(result, indent=2))
+    if not result["success"]: break
+eligible = [item for item in benchmark_results if item["success"] and 0 < item["peak_memory_mib"] <= GPU_MEMORY_LIMIT_MIB and item["examples_per_second"] > 0]
+assert eligible, f"No measured batch met the reserve/throughput requirements. Inspect benchmark errors: {benchmark_results}"
+selected = max(eligible, key=lambda item: item["examples_per_second"])
+BATCH_SIZE = selected["batch_size"]
+print("SELECTED BATCH", BATCH_SIZE, json.dumps(selected, indent=2))
+
+CODE CELL at notebook position 11
+------------------------------------------------------------
+# 7. Set the training budget from the NEW dataset size and measured batch size.
+import math, random
+TRAIN_STEPS = int(math.ceil((dataset.meta.total_frames * TARGET_EPOCHS / BATCH_SIZE) / 500.0) * 500)
+SAVE_FREQ = max(500, int(math.ceil((dataset.meta.total_frames / BATCH_SIZE) / 500.0) * 500))
+WARMUP_STEPS = min(1000, max(200, TRAIN_STEPS // 20))
+SEED = 42
+RUN_NAME = f"{DATASET_NAME}_smolvla_a100_b{BATCH_SIZE}_{TRAIN_STEPS}_steps_{RUN_TAG}"
+TRAIN_OUTPUT = Path("/content/outputs") / RUN_NAME
+LOCAL_REPORT_DIR = Path("/content/training_reports") / RUN_NAME
+DRIVE_RUN_DIR = CHECKPOINT_ROOT / RUN_NAME
+DRIVE_CHECKPOINTS_DIR = DRIVE_RUN_DIR / "checkpoints"
+assert not TRAIN_OUTPUT.exists() and not DRIVE_RUN_DIR.exists(), "Run name already exists; change RUN_NAME or use a fresh runtime"
+LOCAL_REPORT_DIR.mkdir(parents=True, exist_ok=True)
+random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED); torch.cuda.manual_seed_all(SEED)
+TRAIN_ARGS = [
+    "lerobot-train", "--policy.type=smolvla", "--policy.pretrained_path=lerobot/smolvla_base",
+    "--policy.device=cuda", "--policy.use_amp=true", "--policy.push_to_hub=false",
+    f"--policy.scheduler_warmup_steps={WARMUP_STEPS}", f"--policy.scheduler_decay_steps={TRAIN_STEPS}",
+    f"--dataset.repo_id={REPO_ID}", f"--dataset.root={LOCAL_DATASET}", "--dataset.video_backend=pyav",
+    f"--batch_size={BATCH_SIZE}", f"--num_workers={NUM_WORKERS}", f"--seed={SEED}",
+    f"--wandb.enable={str(USE_WANDB).lower()}", f"--wandb.project={WANDB_PROJECT}",
+    "--save_checkpoint=true", "--eval_freq=0", f"--steps={TRAIN_STEPS}", f"--save_freq={SAVE_FREQ}",
+    "--log_freq=10", f"--output_dir={TRAIN_OUTPUT}", f"--job_name={RUN_NAME}",
+]
+resolved = {"dataset": DATASET_NAME, "episodes": dataset.meta.total_episodes, "frames": dataset.meta.total_frames, "target_epochs": TARGET_EPOCHS, "batch_size": BATCH_SIZE, "steps": TRAIN_STEPS, "save_freq": SAVE_FREQ, "workers": NUM_WORKERS, "warmup_steps": WARMUP_STEPS, "action_mode": "absolute", "seed": SEED, "runtime": runtime_report, "drive_checkpoint_retention": "all", "validation": validation_report, "benchmark_results": benchmark_results, "command": TRAIN_ARGS}
+(LOCAL_REPORT_DIR / "resolved_training_config.json").write_text(json.dumps(resolved, indent=2))
+print(json.dumps(resolved, indent=2))
+(LOCAL_REPORT_DIR / "dataset_file_hashes.json").write_text(DATASET_HASH_REPORT.read_text())
+(LOCAL_REPORT_DIR / "pip_freeze.txt").write_text(output([sys.executable, "-m", "pip", "freeze"]))
+shutil.copytree(BENCHMARK_ROOT, LOCAL_REPORT_DIR / "batch_benchmarks")
+
+CODE CELL at notebook position 13
+------------------------------------------------------------
+# 8. Train and automatically preserve complete artifacts and final export.
+import csv
+TRAIN_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+TRAIN_LOG = LOCAL_REPORT_DIR / 'training.log'
+GPU_LOG = LOCAL_REPORT_DIR / 'gpu_metrics.csv'
+DRIVE_RUN_DIR.mkdir(parents=True, exist_ok=False)
+DRIVE_CHECKPOINTS_DIR.mkdir()
+for filename in ('resolved_training_config.json', 'dataset_file_hashes.json', 'pip_freeze.txt'):
+    shutil.copy2(LOCAL_REPORT_DIR / filename, DRIVE_RUN_DIR / filename)
+
+REQUIRED_CHECKPOINT_FILES = (
+    'pretrained_model/model.safetensors', 'pretrained_model/config.json',
+    'pretrained_model/train_config.json', 'pretrained_model/policy_preprocessor.json',
+    'pretrained_model/policy_postprocessor.json', 'training_state/training_step.json',
+    'training_state/optimizer_state.safetensors', 'training_state/optimizer_param_groups.json',
+    'training_state/rng_state.safetensors', 'training_state/scheduler_state.json',
+)
+
+def checkpoint_complete(path):
+    return path.is_dir() and all((path / name).is_file() and (path / name).stat().st_size > 0 for name in REQUIRED_CHECKPOINT_FILES)
+
+synced_steps = set()
+def sync_checkpoints():
+    checkpoint_dir = TRAIN_OUTPUT / 'checkpoints'
+    last = checkpoint_dir / 'last'
+    if not last.is_symlink() or not last.exists():
+        return
+    latest_name = last.resolve().name
+    if not latest_name.isdigit():
+        raise RuntimeError(f'Unexpected completed-checkpoint pointer: {last}')
+    for source in sorted(checkpoint_dir.iterdir()):
+        if not source.name.isdigit() or int(source.name) > int(latest_name) or source.name in synced_steps:
+            continue
+        if not checkpoint_complete(source):
+            raise RuntimeError(f'Completed checkpoint is missing required artifacts: {source}')
+        target = DRIVE_CHECKPOINTS_DIR / source.name
+        hashes = copy_verified_tree(source, target)
+        (DRIVE_RUN_DIR / f'checkpoint_{source.name}_sha256.json').write_text(json.dumps(hashes, indent=2))
+        synced_steps.add(source.name)
+        print('SYNCED COMPLETE CHECKPOINT TO DRIVE:', target, flush=True)
+
+monitor_stop = threading.Event()
+def gpu_monitor():
+    with GPU_LOG.open('w', newline='') as stream:
+        writer = csv.writer(stream)
+        writer.writerow(['time_s', 'memory_mib', 'utilization_percent'])
+        started = time.time()
+        while not monitor_stop.wait(2.0):
+            try:
+                memory, utilization = gpu_sample()
+                writer.writerow([time.time() - started, memory, utilization]); stream.flush()
+            except Exception:
+                pass
+
+monitor_thread = threading.Thread(target=gpu_monitor, daemon=True)
+monitor_thread.start()
+process = None
+try:
+    with TRAIN_LOG.open('w') as log:
+        process = subprocess.Popen(TRAIN_ARGS, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1)
+        for line_count, line in enumerate(process.stdout, 1):
+            print(line, end=''); log.write(line); log.flush()
+            sync_checkpoints()
+            if line_count % 100 == 0:
+                shutil.copy2(TRAIN_LOG, DRIVE_RUN_DIR / 'training_in_progress.log')
+        return_code = process.wait()
+finally:
+    if process is not None and process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            process.kill(); process.wait()
+    monitor_stop.set(); monitor_thread.join(timeout=5)
+    for filename in ('training.log', 'gpu_metrics.csv'):
+        source = LOCAL_REPORT_DIR / filename
+        if source.exists():
+            shutil.copy2(source, DRIVE_RUN_DIR / filename)
+    sync_checkpoints()
+assert return_code == 0, f'Training failed ({return_code}); inspect {TRAIN_LOG}'
+models = [p for p in (TRAIN_OUTPUT / 'checkpoints').iterdir() if p.name.isdigit() and checkpoint_complete(p)]
+assert models, 'No complete numbered checkpoint found'
+final_checkpoint = max(models, key=lambda p: int(p.name))
+assert int(final_checkpoint.name) == TRAIN_STEPS, f'Final step missing: {final_checkpoint}'
+FINAL_MODEL = final_checkpoint / 'pretrained_model'
+final_target = DRIVE_RUN_DIR / 'pretrained_model'
+model_hashes = copy_verified_tree(FINAL_MODEL, final_target)
+(DRIVE_RUN_DIR / 'pretrained_model_sha256.json').write_text(json.dumps(model_hashes, indent=2))
+
+export_archive = DEPLOYMENT_ROOT / f'{RUN_NAME}_complete_checkpoint.tar'
+assert not export_archive.exists(), f'Export already exists: {export_archive}'
+export_staging = export_archive.with_name('.' + export_archive.name + '.copying')
+assert not export_staging.exists(), f'Partial export exists: {export_staging}'
+with tarfile.open(export_staging, 'w') as archive:
+    archive.add(final_target, arcname='pretrained_model')
+# Verify every archived regular file against the model directory before finalizing.
+with tarfile.open(export_staging, 'r:') as archive:
+    archive_hashes = {}
+    for member in archive.getmembers():
+        if not member.isfile():
+            continue
+        relative = PurePosixPath(member.name).relative_to('pretrained_model').as_posix()
+        digest = hashlib.sha256()
+        with archive.extractfile(member) as stream:
+            while chunk := stream.read(16 * 1024 * 1024):
+                digest.update(chunk)
+        archive_hashes[relative] = digest.hexdigest()
+assert archive_hashes == model_hashes, 'Export file verification failed'
+export_staging.rename(export_archive)
+archive_sha256 = sha256_file(export_archive)
+Path(f'{export_archive}.sha256').write_text(f'{archive_sha256}  {export_archive.name}\n')
+copy_verified_tree(LOCAL_REPORT_DIR, REPORT_ROOT / RUN_NAME)
+print('TRAINING COMPLETE:', RUN_NAME)
+print('TRAINED WEIGHTS SAVED TO DRIVE:', final_target)
+print('READY TO DOWNLOAD:', export_archive)
+print('SHA-256:', archive_sha256)
+
+CODE CELL at notebook position 14
+------------------------------------------------------------
+# 9. Optional: inspect actual GPU utilization after the automatic export.
+import matplotlib.pyplot as plt, pandas as pd
+metrics = pd.read_csv(GPU_LOG)
+if len(metrics):
+    fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
+    axes[0].plot(metrics.time_s / 60, metrics.utilization_percent)
+    axes[0].set_ylabel('GPU utilization %'); axes[0].set_ylim(0, 105); axes[0].grid()
+    axes[1].plot(metrics.time_s / 60, metrics.memory_mib / 1024)
+    axes[1].set_ylabel('VRAM GiB'); axes[1].set_xlabel('Minutes'); axes[1].grid()
+    plt.tight_layout(); plt.show()
+    gpu_summary = {'median_gpu_utilization': float(metrics.utilization_percent.median()), 'p95_gpu_utilization': float(metrics.utilization_percent.quantile(0.95)), 'peak_vram_gib': float(metrics.memory_mib.max() / 1024)}
+    (DRIVE_RUN_DIR / 'gpu_summary.json').write_text(json.dumps(gpu_summary, indent=2))
+    print(json.dumps(gpu_summary, indent=2))
+else:
+    print('Training finished before a GPU monitor sample was recorded.')
+
+CODE CELL at notebook position 15
+------------------------------------------------------------
+# 10. Locate the exported model and its checksum. No extra copy cell is required.
+print('Final model:', DRIVE_RUN_DIR / 'pretrained_model')
+print('All retained numbered checkpoints:', DRIVE_CHECKPOINTS_DIR)
+print('Download archive:', export_archive)
+print('Checksum file:', Path(f'{export_archive}.sha256'))
+assert (DRIVE_RUN_DIR / 'pretrained_model/model.safetensors').is_file()
+assert export_archive.is_file() and Path(f'{export_archive}.sha256').is_file()
+
+================================================================================
+notebooks/train_ur5_cube_110ep_v3_pi0_a100_colab.ipynb
+================================================================================
+
+CODE CELL at notebook position 2
+------------------------------------------------------------
+# 1. Verify the assigned runtime before importing torch.
+import json, os, platform, subprocess, sys, time
+from pathlib import Path
+
+def output(command):
+    return subprocess.run(command, text=True, capture_output=True, check=False).stdout.strip()
+
+gpu_report = output(["nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits"])
+print(gpu_report)
+assert gpu_report, "No NVIDIA GPU assigned"
+gpu_name, memory_mib, driver = [item.strip() for item in gpu_report.split(",", 2)]
+assert "A100" in gpu_name, f"Expected an A100 runtime, received {gpu_name}"
+assert int(memory_mib) >= 38000, f"Expected the 40 GB A100, received {memory_mib} MiB"
+assert 'torch' not in sys.modules and 'torchvision' not in sys.modules, 'Start a fresh runtime before installing the pinned stack.'
+runtime_report = {"python": sys.version, "platform": platform.platform(), "gpu": gpu_name, "memory_mib": int(memory_mib), "driver": driver}
+print(json.dumps(runtime_report, indent=2))
+assert (3, 12) <= sys.version_info[:2] <= (3, 13), 'This pinned stack expects Python 3.12 or 3.13.'
+
+CODE CELL at notebook position 3
+------------------------------------------------------------
+# 2. Mount Drive and configure the new dataset.
+from google.colab import drive
+drive.mount('/content/drive')
+DRIVE_ROOT = Path('/content/drive/MyDrive/VLA_Thesis/Sorted VLA Backup Final/pHYSICAL UR5')
+DATASET_NAME = 'ur5_cube_110ep_v3'
+REPO_ID = f'local/{DATASET_NAME}'
+EXPECTED_EPISODES = 110
+EXPECTED_FRAMES = 285204
+TASK = 'Pick up the orange cube and place it in the bowl'
+TRAIN_STEPS = 20_000
+SAVE_FREQ = 2_500
+FINETUNE_MODE = 'expert'  # 'expert' or 'full'
+LOCAL_CHECKPOINTS_TO_KEEP = 2
+USE_WANDB = True  # Required for this experiment; online graphs
+RUN_TAG = time.strftime('%Y%m%d_%H%M%S')
+DATASET_DRIVE_FOLDER = DRIVE_ROOT / 'datasets/lerobot' / DATASET_NAME
+DATASET_ARCHIVE = DRIVE_ROOT / 'datasets/lerobot' / f'{DATASET_NAME}.tar'
+DATASET_CHECKSUM = Path(f'{DATASET_ARCHIVE}.sha256')
+LOCAL_ARCHIVE = Path('/content') / DATASET_ARCHIVE.name
+LOCAL_DATASET = Path('/content') / DATASET_NAME
+CHECKPOINT_ROOT = DRIVE_ROOT / 'checkpoints/ur5_pi0_trained'
+REPORT_ROOT = DRIVE_ROOT / 'reports/training'
+DEPLOYMENT_ROOT = DRIVE_ROOT / 'deployment/downloaded_checkpoints'
+assert DRIVE_ROOT.is_dir(), f'Drive root missing: {DRIVE_ROOT}'
+folder_upload = DATASET_DRIVE_FOLDER.is_dir()
+archive_upload = DATASET_ARCHIVE.is_file() and DATASET_CHECKSUM.is_file()
+assert folder_upload or archive_upload, f'Upload {DATASET_DRIVE_FOLDER}, or {DATASET_ARCHIVE} plus its .sha256 file'
+if folder_upload:
+    for name in ('data', 'meta', 'videos'):
+        assert (DATASET_DRIVE_FOLDER / name).is_dir(), f'Incomplete upload: missing {name}'
+for directory in (CHECKPOINT_ROOT, REPORT_ROOT, DEPLOYMENT_ROOT):
+    directory.mkdir(parents=True, exist_ok=True)
+print('Input:', DATASET_DRIVE_FOLDER if folder_upload else DATASET_ARCHIVE)
+print('Dataset:', EXPECTED_EPISODES, 'episodes;', EXPECTED_FRAMES, 'frames')
+assert FINETUNE_MODE in {'expert', 'full'}
+assert TRAIN_STEPS > 0 and SAVE_FREQ > 0
+print('W&B:', USE_WANDB, '| Fine-tune mode:', FINETUNE_MODE, '| Steps:', TRAIN_STEPS)
+
+CODE CELL at notebook position 5
+------------------------------------------------------------
+# Install before importing Torch or Transformers.
+assert 'torch' not in sys.modules and 'transformers' not in sys.modules, 'Start a fresh runtime and run from the top.'
+%pip install -q --upgrade pip
+%pip install -q --index-url https://download.pytorch.org/whl/cu126 "torch==2.7.1" "torchvision==0.22.1" "torchaudio==2.7.1"
+%pip install -q "lerobot[pi,training]==0.6.1" "torch==2.7.1" "torchvision==0.22.1" "torchcodec==0.3.0" "transformers==5.4.0" "av==15.1.0" "wandb==0.24.2" "accelerate==1.14.0" matplotlib psutil
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+import importlib.metadata as md, torch, torchvision, av
+from lerobot.policies.pi0.configuration_pi0 import PI05Config
+from lerobot.policies.pi0.modeling_pi0 import PI05Policy
+assert torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+assert torch.__version__.startswith('2.7.1') and torchvision.__version__.startswith('0.22.1')
+assert md.version('lerobot') == '0.6.1' and md.version('transformers') == '5.4.0'
+assert av.__version__ == '15.1.0' and hasattr(av, 'option')
+assert torchvision.extension._has_ops()
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.set_float32_matmul_precision('high')
+runtime_report.update({name: md.version(name) for name in ('torch', 'torchvision', 'lerobot', 'transformers', 'accelerate', 'av', 'torchcodec')})
+runtime_report['cuda'] = torch.version.cuda
+print(json.dumps(runtime_report, indent=2))
+
+CODE CELL at notebook position 6
+------------------------------------------------------------
+# 3. Copy to local disk, verify every copied file, and retain a fingerprint report.
+import hashlib, shutil, tarfile
+from pathlib import PurePosixPath
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        while chunk := stream.read(16 * 1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+def tree_hashes(root):
+    root = Path(root)
+    return {str(p.relative_to(root)): sha256_file(p) for p in sorted(root.rglob('*')) if p.is_file()}
+
+def copy_verified_tree(source, destination):
+    source, destination = Path(source), Path(destination)
+    before = tree_hashes(source)
+    assert before, f'No files in {source}'
+    if destination.exists():
+        assert tree_hashes(destination) == before, f'Destination exists with different content: {destination}'
+        return before
+    staging = destination.with_name('.' + destination.name + '.copying')
+    assert not staging.exists(), f'Partial copy exists: {staging}. Inspect it before retrying.'
+    shutil.copytree(source, staging)
+    assert tree_hashes(staging) == before, f'Copy checksum failed: {staging}'
+    assert tree_hashes(source) == before, f'Source changed during copy: {source}'
+    staging.rename(destination)
+    return before
+
+assert shutil.disk_usage('/content').free >= 60 * 1024**3, 'Need at least 60 GiB free local disk before staging/training.'
+if folder_upload:
+    print('Copying dataset folder; verifying SHA-256 of every file ...')
+    dataset_file_hashes = copy_verified_tree(DATASET_DRIVE_FOLDER, LOCAL_DATASET)
+else:
+    expected_sha = DATASET_CHECKSUM.read_text().split()[0].lower()
+    assert len(expected_sha) == 64 and all(c in '0123456789abcdef' for c in expected_sha)
+    if not LOCAL_ARCHIVE.exists():
+        shutil.copy2(DATASET_ARCHIVE, LOCAL_ARCHIVE)
+    assert sha256_file(LOCAL_ARCHIVE) == expected_sha, 'Archive SHA-256 mismatch'
+    assert not LOCAL_DATASET.exists(), f'Local dataset already exists: {LOCAL_DATASET}; inspect before extracting.'
+    staging = Path('/content') / ('.' + DATASET_NAME + '.extracting')
+    staging.mkdir(exist_ok=False)
+    with tarfile.open(LOCAL_ARCHIVE, 'r:*') as archive:
+        members = archive.getmembers()
+        for member in members:
+            relative = PurePosixPath(member.name)
+            assert relative.parts and relative.parts[0] == DATASET_NAME, f'Unexpected archive root: {member.name}'
+            assert not relative.is_absolute() and '..' not in relative.parts
+            assert member.isfile() or member.isdir(), f'Unsupported archive entry: {member.name}'
+        archive.extractall(staging, members=members, filter='data')
+    (staging / DATASET_NAME).rename(LOCAL_DATASET)
+    staging.rmdir()
+    dataset_file_hashes = tree_hashes(LOCAL_DATASET)
+EXPECTED_METADATA_SHA256 = {'meta/info.json': 'de71d93083204c98babf100c8331061badae2df7aa1a3bf23de5e8deecfa4fdf', 'meta/ur5_vla_conversion.json': 'eda8704603a39667c9b540b966cb8efdfee54e8b7d2ab4f34765ca24de592d21'}
+for relative, expected in EXPECTED_METADATA_SHA256.items():
+    assert sha256_file(LOCAL_DATASET / relative) == expected, f'Dataset metadata differs from the reviewed 110-episode artifact: {relative}'
+for name in ('data', 'meta', 'videos'):
+    assert (LOCAL_DATASET / name).is_dir(), f'Missing local {name}'
+DATASET_HASH_REPORT = Path('/content') / f'{DATASET_NAME}_file_hashes.json'
+DATASET_HASH_REPORT.write_text(json.dumps(dataset_file_hashes, indent=2))
+print('COPY VERIFIED:', len(dataset_file_hashes), 'files;', LOCAL_DATASET)
+
+CODE CELL at notebook position 7
+------------------------------------------------------------
+# 4. Validate all state/action rows and decode three paired video samples per episode.
+import numpy as np
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+dataset = LeRobotDataset(REPO_ID, root=LOCAL_DATASET, video_backend='pyav')
+assert dataset.meta.total_episodes == EXPECTED_EPISODES
+assert dataset.meta.total_frames == EXPECTED_FRAMES == len(dataset)
+assert dataset.meta.fps == 20
+assert list(dataset.meta.tasks.index) == [TASK]
+features = dataset.meta.features
+JOINT_ORDER = ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint']
+for key in ('observation.images.base', 'observation.images.wrist'):
+    assert features[key]['dtype'] == 'video' and tuple(features[key]['shape']) == (480, 640, 3)
+assert tuple(features['observation.state']['shape']) == (7,)
+assert tuple(features['action']['shape']) == (7,)
+assert features['observation.state']['names'] == JOINT_ORDER + ['estimated_gripper_state']
+assert features['action']['names'] == JOINT_ORDER + ['gripper_command']
+conversion = json.loads((LOCAL_DATASET / 'meta/ur5_vla_conversion.json').read_text())
+assert conversion['action_semantics'] == 'six absolute joint-position targets plus absolute binary gripper command'
+assert conversion['action_mode'] == 'absolute' and conversion['joint_unit'] == 'radian'
+assert conversion['joint_order'] == JOINT_ORDER
+assert conversion['gripper_closed_value'] == 0.0 and conversion['gripper_open_value'] == 1.0
+assert conversion['gripper_is_measured'] is False
+assert len(conversion['source_episode_names']) == len(set(conversion['source_episode_names'])) == EXPECTED_EPISODES
+assert not {'episode_20261001_175654', 'episode_20261001_182413'} & set(conversion['source_episode_names'])
+
+rows_checked, episode_ids = 0, set()
+vectors = dataset.hf_dataset.select_columns(['observation.state', 'action', 'episode_index', 'task_index'])
+for batch in vectors.iter(batch_size=8192):
+    state = np.asarray(batch['observation.state'], dtype=np.float32)
+    action = np.asarray(batch['action'], dtype=np.float32)
+    assert state.ndim == 2 and state.shape == action.shape and state.shape[1] == 7
+    assert np.isfinite(state).all() and np.isfinite(action).all()
+    for gripper in (state[:, 6], action[:, 6]):
+        assert np.all(np.minimum(np.abs(gripper), np.abs(gripper - 1)) < 1e-5)
+    assert np.all(np.asarray(batch['task_index']) == 0)
+    episode_ids.update(np.asarray(batch['episode_index']).reshape(-1).tolist())
+    rows_checked += len(state)
+assert rows_checked == EXPECTED_FRAMES and episode_ids == set(range(EXPECTED_EPISODES))
+
+sample_count = 0
+for ep in range(EXPECTED_EPISODES):
+    info = dataset.meta.episodes[ep]
+    start, stop = int(info['dataset_from_index']), int(info['dataset_to_index'])
+    assert 0 <= start < stop <= EXPECTED_FRAMES
+    for index in sorted({start, (start + stop - 1) // 2, stop - 1}):
+        sample = dataset[index]
+        for key in ('observation.images.base', 'observation.images.wrist'):
+            image = np.asarray(sample[key])
+            assert image.shape == (3, 480, 640) and np.isfinite(image).all()
+        sample_count += 1
+    if (ep + 1) % 10 == 0:
+        print(f'Video validation: {ep + 1}/{EXPECTED_EPISODES} episodes')
+validation_report = {'episodes': EXPECTED_EPISODES, 'frames': rows_checked, 'fps': 20, 'task': TASK, 'paired_video_samples': sample_count, 'action_mode': 'absolute', 'validation': 'PASS', 'held_out_split': False}
+print(json.dumps(validation_report, indent=2))
+Path('/content/dataset_validation.json').write_text(json.dumps(validation_report, indent=2))
+# Show representative paired inputs before training.
+import matplotlib.pyplot as plt
+fig, axes = plt.subplots(2, 2, figsize=(10, 7))
+for row, index in enumerate((0, EXPECTED_FRAMES - 1)):
+    sample = dataset[index]
+    for col, key in enumerate(('observation.images.base', 'observation.images.wrist')):
+        axes[row, col].imshow(np.asarray(sample[key]).transpose(1, 2, 0))
+        axes[row, col].set_title(f'{key.rsplit(".", 1)[-1]} — frame {index}')
+        axes[row, col].axis('off')
+plt.tight_layout(); plt.show()
+
+# Pi0 normalizes continuous state/action with the dataset mean and standard deviation.
+for key in ('observation.state', 'action'):
+    for statistic in ('mean', 'std'):
+        value = np.asarray(dataset.meta.stats[key][statistic]).reshape(-1)
+        assert value.shape == (7,) and np.isfinite(value).all()
+        if statistic == 'std': assert np.all(value >= 0)
+validation_report['normalization'] = 'MEAN_STD for STATE/ACTION; IDENTITY for VISUAL'
+Path('/content/dataset_validation.json').write_text(json.dumps(validation_report, indent=2))
+
+CODE CELL at notebook position 8
+------------------------------------------------------------
+# Authenticate without embedding tokens in notebook source or reports.
+from google.colab import userdata
+from getpass import getpass
+from huggingface_hub import HfApi, get_token, login as hf_login, snapshot_download
+from transformers import AutoTokenizer
+
+def authenticate_hugging_face():
+    try:
+        token = userdata.get('HF_TOKEN')
+    except Exception as error:
+        print(f'Colab secret unavailable ({type(error).__name__}); checking existing login.')
+        token = None
+    token = (token or get_token() or '').strip()
+    if not token:
+        print('Create a read token at https://huggingface.co/settings/tokens')
+        print('Accept tokenizer access at https://huggingface.co/google/paligemma-3b-pt-224 using the same account.')
+        token = getpass('Hugging Face read token (hidden input): ').strip()
+    if not token:
+        raise ValueError('No token entered. Add HF_TOKEN in Colab Secrets or rerun this cell and use the hidden prompt.')
+    hf_login(token=token, add_to_git_credential=False)
+    # Downloads tokenizer files only. Access must work before the large model download.
+    try:
+        tokenizer = AutoTokenizer.from_pretrained('google/paligemma-3b-pt-224', token=token)
+    except OSError:
+        raise RuntimeError('Tokenizer download failed. Confirm this token can read google/paligemma-3b-pt-224, accept its license with the same account, and check connectivity. Then rerun this cell.') from None
+    assert tokenizer('test')['input_ids'], 'Tokenizer returned no tokens'
+    print('Hugging Face login and PaliGemma tokenizer verified.')
+
+authenticate_hugging_face()
+BASE_MODEL = 'lerobot/pi0_base'
+MODEL_REVISION = HfApi().model_info(BASE_MODEL).sha
+assert MODEL_REVISION
+print('Tokenizer access verified. Caching base weights at revision:', MODEL_REVISION)
+# Resolve a fixed revision once, then reuse this exact local snapshot in every subprocess.
+BASE_MODEL_PATH = snapshot_download(BASE_MODEL, revision=MODEL_REVISION, allow_patterns=['*.json', '*.safetensors'])
+for name in ('config.json', 'model.safetensors', 'policy_preprocessor.json', 'policy_postprocessor.json'):
+    assert (Path(BASE_MODEL_PATH) / name).is_file(), f'Missing base model artifact: {name}'
+assert json.loads((Path(BASE_MODEL_PATH) / 'config.json').read_text())['type'] == 'pi0'
+WANDB_PROJECT = 'ur5-experiment1-pi0'
+if USE_WANDB:
+    import wandb
+    try:
+        wandb_key = userdata.get('WANDB_API_KEY')
+    except Exception:
+        wandb_key = None
+    wandb.login(key=wandb_key) if wandb_key else wandb.login()
+print('W&B:', WANDB_PROJECT if USE_WANDB else 'disabled')
+
+CODE CELL at notebook position 10
+------------------------------------------------------------
+SEED = 42
+TRAIN_EXPERT_ONLY = FINETUNE_MODE == 'expert'
+NORMALIZATION = {'STATE': 'MEAN_STD', 'ACTION': 'MEAN_STD', 'VISUAL': 'IDENTITY'}
+def policy_arguments():
+    return [
+        '--policy.type=pi0', f'--policy.pretrained_path={BASE_MODEL_PATH}',
+        '--policy.device=cuda', '--policy.dtype=bfloat16', '--policy.use_amp=false',
+        '--policy.use_relative_actions=false', '--policy.gradient_checkpointing=true',
+        '--policy.compile_model=false', '--policy.push_to_hub=false',
+        '--policy.chunk_size=50', '--policy.n_action_steps=50', '--policy.empty_cameras=1',
+        f'--policy.train_expert_only={str(TRAIN_EXPERT_ONLY).lower()}',
+        f'--policy.freeze_vision_encoder={str(TRAIN_EXPERT_ONLY).lower()}',
+        '--policy.normalization_mapping=' + json.dumps(NORMALIZATION, separators=(',', ':')),
+    ]
+def dataset_arguments():
+    return [f'--dataset.repo_id={REPO_ID}', f'--dataset.root={LOCAL_DATASET}',
+            '--dataset.video_backend=pyav', '--dataset.image_transforms.enable=false',
+            '--dataset.eval_split=0.0', '--env_eval_freq=0', '--eval_steps=0']
+# 6. Benchmark stable batches and choose the fastest one within the memory reserve.
+import re, statistics, subprocess, threading
+
+BATCH_CANDIDATES = [1, 2, 4, 8, 16, 24] if FINETUNE_MODE == 'expert' else [1, 2, 4]
+BENCHMARK_STEPS = 6
+NUM_WORKERS = max(1, min(8, (os.cpu_count() or 2) - 2))
+GPU_MEMORY_LIMIT_MIB = int(runtime_report["memory_mib"] * 0.88)
+BENCHMARK_ROOT = Path("/content") / f"{DATASET_NAME}_benchmarks_{RUN_TAG}"
+assert not BENCHMARK_ROOT.exists(), "Benchmark directory already exists; inspect before rerunning"
+BENCHMARK_ROOT.mkdir()
+
+def gpu_sample():
+    text = output(["nvidia-smi", "--query-gpu=memory.used,utilization.gpu", "--format=csv,noheader,nounits"])
+    memory, utilization = [int(float(value.strip())) for value in text.split(",")[:2]]
+    return memory, utilization
+
+def benchmark(batch_size):
+    run_dir = BENCHMARK_ROOT / f"batch_{batch_size}"
+    command = [
+        'lerobot-train', *policy_arguments(), *dataset_arguments(),
+        f'--batch_size={batch_size}', f'--num_workers={NUM_WORKERS}', f'--seed={SEED}',
+        '--wandb.enable=false', '--save_checkpoint=false',
+        f'--steps={BENCHMARK_STEPS}', '--log_freq=1', f'--output_dir={run_dir}',
+        f'--job_name=pi0_bench_b{batch_size}',
+    ]
+    samples, lines, stop = [], [], threading.Event()
+    def monitor():
+        while not stop.wait(0.25):
+            try: samples.append(gpu_sample())
+            except Exception: pass
+    thread = threading.Thread(target=monitor, daemon=True); thread.start()
+    started = time.time()
+    process = None
+    try:
+        process = subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1)
+        for line in process.stdout:
+            print(f"[batch {batch_size}] {line}", end="")
+            lines.append(line)
+        code = process.wait()
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill(); process.wait()
+        stop.set(); thread.join(timeout=2)
+        (BENCHMARK_ROOT / f"batch_{batch_size}.log").write_text("".join(lines))
+    text = "".join(lines)
+    update_times = [float(value) for value in re.findall(r"updt_s:\s*([0-9.]+)", text)]
+    stable_times = update_times[len(update_times)//2:]
+    peak_memory = max((item[0] for item in samples), default=0)
+    utilization_samples = [item[1] for item in samples]
+    median_util = statistics.median(utilization_samples) if utilization_samples else 0
+    throughput = batch_size / statistics.median(stable_times) if stable_times and code == 0 else 0.0
+    result = {"batch_size": batch_size, "success": code == 0 and "All keys loaded successfully!" in text, "peak_memory_mib": peak_memory, "median_gpu_utilization": median_util, "examples_per_second": throughput, "elapsed_s": time.time() - started}
+    if not result['success']:
+        result["error_tail"] = "\n".join(text.splitlines()[-40:])
+    (BENCHMARK_ROOT / f"batch_{batch_size}.log").write_text(text)
+    shutil.rmtree(run_dir, ignore_errors=True)
+    return result
+
+benchmark_results = []
+for candidate in BATCH_CANDIDATES:
+    result = benchmark(candidate); benchmark_results.append(result); print(json.dumps(result, indent=2))
+    if not result["success"]:
+        error = result.get('error_tail', '').lower()
+        if 'out of memory' in error:
+            break
+        raise RuntimeError('Pi0 probe failed for a non-memory reason: ' + result.get('error_tail', 'No log'))
+eligible = [item for item in benchmark_results if item["success"] and 0 < item["peak_memory_mib"] <= GPU_MEMORY_LIMIT_MIB and item["examples_per_second"] > 0]
+assert eligible, f"No measured batch met the reserve/throughput requirements. Inspect benchmark errors: {benchmark_results}"
+selected = max(eligible, key=lambda item: item["examples_per_second"])
+BATCH_SIZE = selected["batch_size"]
+print("SELECTED BATCH", BATCH_SIZE, json.dumps(selected, indent=2))
+
+CODE CELL at notebook position 11
+------------------------------------------------------------
+# Resolve the run budget and preserve reproducibility information.
+import random
+WARMUP_STEPS = min(1000, max(1, TRAIN_STEPS // 20))
+APPROX_DATASET_PASSES = TRAIN_STEPS * BATCH_SIZE / dataset.meta.total_frames
+ESTIMATED_TRAIN_HOURS = TRAIN_STEPS * BATCH_SIZE / selected['examples_per_second'] / 3600
+RUN_NAME = f'{DATASET_NAME}_pi0_{FINETUNE_MODE}_a100_b{BATCH_SIZE}_{TRAIN_STEPS}_steps_{RUN_TAG}'
+TRAIN_OUTPUT = Path('/content/outputs') / RUN_NAME
+LOCAL_REPORT_DIR = Path('/content/training_reports') / RUN_NAME
+DRIVE_RUN_DIR = CHECKPOINT_ROOT / RUN_NAME
+DRIVE_CHECKPOINTS_DIR = DRIVE_RUN_DIR / 'checkpoints'
+assert not TRAIN_OUTPUT.exists() and not DRIVE_RUN_DIR.exists(), 'Run already exists; choose a new run tag.'
+assert shutil.disk_usage('/content').free >= 40 * 1024**3, 'Need 40 GiB local headroom after staging data and model.'
+LOCAL_REPORT_DIR.mkdir(parents=True, exist_ok=False)
+random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED)
+TRAIN_ARGS = [
+    'lerobot-train', *policy_arguments(), *dataset_arguments(),
+    f'--policy.scheduler_warmup_steps={WARMUP_STEPS}', f'--policy.scheduler_decay_steps={TRAIN_STEPS}',
+    f'--batch_size={BATCH_SIZE}', f'--num_workers={NUM_WORKERS}', f'--seed={SEED}',
+    '--wandb.enable=true', '--wandb.mode=online', '--wandb.disable_artifact=true', f'--wandb.project={WANDB_PROJECT}',
+    '--save_checkpoint=true', f'--steps={TRAIN_STEPS}', f'--save_freq={SAVE_FREQ}',
+    '--log_freq=1', f'--output_dir={TRAIN_OUTPUT}', f'--job_name={RUN_NAME}',
+]
+resolved = {'policy': 'pi0', 'base_model': BASE_MODEL, 'model_revision': MODEL_REVISION,
+    'dataset': DATASET_NAME, 'episodes': dataset.meta.total_episodes, 'frames': dataset.meta.total_frames,
+    'finetune_mode': FINETUNE_MODE, 'batch_size': BATCH_SIZE, 'steps': TRAIN_STEPS, 'save_freq': SAVE_FREQ,
+    'approx_dataset_passes': APPROX_DATASET_PASSES, 'estimated_compute_hours': ESTIMATED_TRAIN_HOURS,
+    'action_mode': 'absolute', 'normalization': NORMALIZATION, 'seed': SEED, 'runtime': runtime_report,
+    'validation': validation_report, 'benchmark_results': benchmark_results, 'command': TRAIN_ARGS,
+    'drive_checkpoint_retention': 'all', 'local_checkpoint_retention': LOCAL_CHECKPOINTS_TO_KEEP}
+(LOCAL_REPORT_DIR / 'resolved_training_config.json').write_text(json.dumps(resolved, indent=2))
+(LOCAL_REPORT_DIR / 'dataset_file_hashes.json').write_text(DATASET_HASH_REPORT.read_text())
+(LOCAL_REPORT_DIR / 'dataset_stats.json').write_text((LOCAL_DATASET / 'meta/stats.json').read_text())
+(LOCAL_REPORT_DIR / 'pip_freeze.txt').write_text(output([sys.executable, '-m', 'pip', 'freeze']))
+shutil.copytree(BENCHMARK_ROOT, LOCAL_REPORT_DIR / 'batch_benchmarks')
+print(json.dumps(resolved, indent=2))
+print(f'Estimated training compute: {ESTIMATED_TRAIN_HOURS:.1f} h; checkpoint copies add time. Colab sessions can end before completion.')
+
+CODE CELL at notebook position 13
+------------------------------------------------------------
+# 8. Train and automatically preserve complete artifacts and final export.
+import csv
+TRAIN_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+TRAIN_LOG = LOCAL_REPORT_DIR / 'training.log'
+GPU_LOG = LOCAL_REPORT_DIR / 'gpu_metrics.csv'
+DRIVE_RUN_DIR.mkdir(parents=True, exist_ok=False)
+DRIVE_CHECKPOINTS_DIR.mkdir()
+for filename in ('resolved_training_config.json', 'dataset_file_hashes.json', 'dataset_stats.json', 'pip_freeze.txt'):
+    shutil.copy2(LOCAL_REPORT_DIR / filename, DRIVE_RUN_DIR / filename)
+
+REQUIRED_CHECKPOINT_FILES = (
+    'pretrained_model/model.safetensors', 'pretrained_model/config.json',
+    'pretrained_model/train_config.json', 'pretrained_model/policy_preprocessor.json',
+    'pretrained_model/policy_postprocessor.json', 'training_state/training_step.json',
+    'training_state/optimizer_state.safetensors', 'training_state/optimizer_param_groups.json',
+    'training_state/rng_state.safetensors', 'training_state/scheduler_state.json',
+)
+
+def checkpoint_complete(path):
+    return path.is_dir() and all((path / name).is_file() and (path / name).stat().st_size > 0 for name in REQUIRED_CHECKPOINT_FILES)
+
+def prune_verified_local_checkpoints(checkpoint_dir):
+    completed = sorted((p for p in checkpoint_dir.iterdir() if p.name.isdigit() and p.name in synced_steps), key=lambda p: int(p.name))
+    for old in completed[:-LOCAL_CHECKPOINTS_TO_KEEP]:
+        # Verify the persistent copy again before deleting this run's local copy.
+        assert tree_hashes(old) == tree_hashes(DRIVE_CHECKPOINTS_DIR / old.name), f'Drive copy changed: {old.name}'
+        shutil.rmtree(old)
+
+synced_steps = set()
+def sync_checkpoints():
+    checkpoint_dir = TRAIN_OUTPUT / 'checkpoints'
+    last = checkpoint_dir / 'last'
+    if not last.is_symlink() or not last.exists():
+        return
+    latest_name = last.resolve().name
+    if not latest_name.isdigit():
+        raise RuntimeError(f'Unexpected completed-checkpoint pointer: {last}')
+    for source in sorted(checkpoint_dir.iterdir()):
+        if not source.name.isdigit() or int(source.name) > int(latest_name) or source.name in synced_steps:
+            continue
+        if not checkpoint_complete(source):
+            raise RuntimeError(f'Completed checkpoint is missing required artifacts: {source}')
+        target = DRIVE_CHECKPOINTS_DIR / source.name
+        hashes = copy_verified_tree(source, target)
+        (DRIVE_RUN_DIR / f'checkpoint_{source.name}_sha256.json').write_text(json.dumps(hashes, indent=2))
+        synced_steps.add(source.name)
+        print('SYNCED COMPLETE CHECKPOINT TO DRIVE:', target, flush=True)
+    prune_verified_local_checkpoints(checkpoint_dir)
+
+monitor_stop = threading.Event()
+def gpu_monitor():
+    with GPU_LOG.open('w', newline='') as stream:
+        writer = csv.writer(stream)
+        writer.writerow(['time_s', 'memory_mib', 'utilization_percent'])
+        started = time.time()
+        while not monitor_stop.wait(2.0):
+            try:
+                memory, utilization = gpu_sample()
+                writer.writerow([time.time() - started, memory, utilization]); stream.flush()
+            except Exception:
+                pass
+
+monitor_thread = threading.Thread(target=gpu_monitor, daemon=True)
+monitor_thread.start()
+process = None
+try:
+    with TRAIN_LOG.open('w') as log:
+        process = subprocess.Popen(TRAIN_ARGS, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1)
+        for line_count, line in enumerate(process.stdout, 1):
+            print(line, end=''); log.write(line); log.flush()
+            if any(message in line for message in ('Returning model without loading pretrained weights', 'Warning: Could not load state dict:')):
+                raise RuntimeError('Pi0 pretrained loading failed; refusing random initialization')
+            if 'wandb.ai/' in line:
+                for url in re.findall(r'https://wandb\.ai/[^\s\x1b]+', line):
+                    if '/runs/' in url:
+                        (DRIVE_RUN_DIR / 'wandb_url.txt').write_text(url+'\n')
+            sync_checkpoints()
+            if line_count % 100 == 0:
+                shutil.copy2(TRAIN_LOG, DRIVE_RUN_DIR / 'training_in_progress.log')
+        return_code = process.wait()
+finally:
+    if process is not None and process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            process.kill(); process.wait()
+    monitor_stop.set(); monitor_thread.join(timeout=5)
+    for filename in ('training.log', 'gpu_metrics.csv'):
+        source = LOCAL_REPORT_DIR / filename
+        if source.exists():
+            shutil.copy2(source, DRIVE_RUN_DIR / filename)
+    sync_checkpoints()
+assert return_code == 0, f'Training failed ({return_code}); inspect {TRAIN_LOG}'
+models = [p for p in (TRAIN_OUTPUT / 'checkpoints').iterdir() if p.name.isdigit() and checkpoint_complete(p)]
+assert models, 'No complete numbered checkpoint found'
+final_checkpoint = max(models, key=lambda p: int(p.name))
+assert int(final_checkpoint.name) == TRAIN_STEPS, f'Final step missing: {final_checkpoint}'
+FINAL_MODEL = final_checkpoint / 'pretrained_model'
+final_target = DRIVE_RUN_DIR / 'pretrained_model'
+model_hashes = copy_verified_tree(FINAL_MODEL, final_target)
+(DRIVE_RUN_DIR / 'pretrained_model_sha256.json').write_text(json.dumps(model_hashes, indent=2))
+
+export_archive = DEPLOYMENT_ROOT / f'{RUN_NAME}_complete_checkpoint.tar'
+assert not export_archive.exists(), f'Export already exists: {export_archive}'
+export_staging = export_archive.with_name('.' + export_archive.name + '.copying')
+assert not export_staging.exists(), f'Partial export exists: {export_staging}'
+with tarfile.open(export_staging, 'w') as archive:
+    archive.add(final_target, arcname='pretrained_model')
+# Verify every archived regular file against the model directory before finalizing.
+with tarfile.open(export_staging, 'r:') as archive:
+    archive_hashes = {}
+    for member in archive.getmembers():
+        if not member.isfile():
+            continue
+        relative = PurePosixPath(member.name).relative_to('pretrained_model').as_posix()
+        digest = hashlib.sha256()
+        with archive.extractfile(member) as stream:
+            while chunk := stream.read(16 * 1024 * 1024):
+                digest.update(chunk)
+        archive_hashes[relative] = digest.hexdigest()
+assert archive_hashes == model_hashes, 'Export file verification failed'
+export_staging.rename(export_archive)
+archive_sha256 = sha256_file(export_archive)
+Path(f'{export_archive}.sha256').write_text(f'{archive_sha256}  {export_archive.name}\n')
+copy_verified_tree(LOCAL_REPORT_DIR, REPORT_ROOT / RUN_NAME)
+print('TRAINING COMPLETE:', RUN_NAME)
+print('TRAINED WEIGHTS SAVED TO DRIVE:', final_target)
+print('READY TO DOWNLOAD:', export_archive)
+print('SHA-256:', archive_sha256)
+
+CODE CELL at notebook position 14
+------------------------------------------------------------
+# 9. Optional: inspect actual GPU utilization after the automatic export.
+import matplotlib.pyplot as plt, pandas as pd
+metrics = pd.read_csv(GPU_LOG)
+if len(metrics):
+    fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
+    axes[0].plot(metrics.time_s / 60, metrics.utilization_percent)
+    axes[0].set_ylabel('GPU utilization %'); axes[0].set_ylim(0, 105); axes[0].grid()
+    axes[1].plot(metrics.time_s / 60, metrics.memory_mib / 1024)
+    axes[1].set_ylabel('VRAM GiB'); axes[1].set_xlabel('Minutes'); axes[1].grid()
+    plt.tight_layout(); plt.show()
+    gpu_summary = {'median_gpu_utilization': float(metrics.utilization_percent.median()), 'p95_gpu_utilization': float(metrics.utilization_percent.quantile(0.95)), 'peak_vram_gib': float(metrics.memory_mib.max() / 1024)}
+    (DRIVE_RUN_DIR / 'gpu_summary.json').write_text(json.dumps(gpu_summary, indent=2))
+    print(json.dumps(gpu_summary, indent=2))
+else:
+    print('Training finished before a GPU monitor sample was recorded.')
+
+CODE CELL at notebook position 15
+------------------------------------------------------------
+# 10. Locate the exported model and its checksum. No extra copy cell is required.
+print('Final model:', DRIVE_RUN_DIR / 'pretrained_model')
+print('All retained numbered checkpoints:', DRIVE_CHECKPOINTS_DIR)
+print('Download archive:', export_archive)
+print('Checksum file:', Path(f'{export_archive}.sha256'))
+assert (DRIVE_RUN_DIR / 'pretrained_model/model.safetensors').is_file()
+assert export_archive.is_file() and Path(f'{export_archive}.sha256').is_file()
+
+================================================================================
+notebooks/train_ur5_cube_110ep_v3_pi05_a100_colab.ipynb
+================================================================================
+
+CODE CELL at notebook position 2
+------------------------------------------------------------
+# 1. Verify the assigned runtime before importing torch.
+import json, os, platform, subprocess, sys, time
+from pathlib import Path
+
+def output(command):
+    return subprocess.run(command, text=True, capture_output=True, check=False).stdout.strip()
+
+gpu_report = output(["nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits"])
+print(gpu_report)
+assert gpu_report, "No NVIDIA GPU assigned"
+gpu_name, memory_mib, driver = [item.strip() for item in gpu_report.split(",", 2)]
+assert "A100" in gpu_name, f"Expected an A100 runtime, received {gpu_name}"
+assert int(memory_mib) >= 38000, f"Expected the 40 GB A100, received {memory_mib} MiB"
+assert 'torch' not in sys.modules and 'torchvision' not in sys.modules, 'Start a fresh runtime before installing the pinned stack.'
+runtime_report = {"python": sys.version, "platform": platform.platform(), "gpu": gpu_name, "memory_mib": int(memory_mib), "driver": driver}
+print(json.dumps(runtime_report, indent=2))
+assert (3, 12) <= sys.version_info[:2] <= (3, 13), 'This pinned stack expects Python 3.12 or 3.13.'
+
+CODE CELL at notebook position 3
+------------------------------------------------------------
+# 2. Mount Drive and configure the new dataset.
+from google.colab import drive
+drive.mount('/content/drive')
+DRIVE_ROOT = Path('/content/drive/MyDrive/VLA_Thesis/Sorted VLA Backup Final/pHYSICAL UR5')
+DATASET_NAME = 'ur5_cube_110ep_v3'
+REPO_ID = f'local/{DATASET_NAME}'
+EXPECTED_EPISODES = 110
+EXPECTED_FRAMES = 285204
+TASK = 'Pick up the orange cube and place it in the bowl'
+TRAIN_STEPS = 20_000
+SAVE_FREQ = 2_500
+FINETUNE_MODE = 'expert'  # 'expert' or 'full'
+LOCAL_CHECKPOINTS_TO_KEEP = 2
+USE_WANDB = True
+RUN_TAG = time.strftime('%Y%m%d_%H%M%S')
+DATASET_DRIVE_FOLDER = DRIVE_ROOT / 'datasets/lerobot' / DATASET_NAME
+DATASET_ARCHIVE = DRIVE_ROOT / 'datasets/lerobot' / f'{DATASET_NAME}.tar'
+DATASET_CHECKSUM = Path(f'{DATASET_ARCHIVE}.sha256')
+LOCAL_ARCHIVE = Path('/content') / DATASET_ARCHIVE.name
+LOCAL_DATASET = Path('/content') / DATASET_NAME
+CHECKPOINT_ROOT = DRIVE_ROOT / 'checkpoints/ur5_pi05_trained'
+REPORT_ROOT = DRIVE_ROOT / 'reports/training'
+DEPLOYMENT_ROOT = DRIVE_ROOT / 'deployment/downloaded_checkpoints'
+assert DRIVE_ROOT.is_dir(), f'Drive root missing: {DRIVE_ROOT}'
+folder_upload = DATASET_DRIVE_FOLDER.is_dir()
+archive_upload = DATASET_ARCHIVE.is_file() and DATASET_CHECKSUM.is_file()
+assert folder_upload or archive_upload, f'Upload {DATASET_DRIVE_FOLDER}, or {DATASET_ARCHIVE} plus its .sha256 file'
+if folder_upload:
+    for name in ('data', 'meta', 'videos'):
+        assert (DATASET_DRIVE_FOLDER / name).is_dir(), f'Incomplete upload: missing {name}'
+for directory in (CHECKPOINT_ROOT, REPORT_ROOT, DEPLOYMENT_ROOT):
+    directory.mkdir(parents=True, exist_ok=True)
+print('Input:', DATASET_DRIVE_FOLDER if folder_upload else DATASET_ARCHIVE)
+print('Dataset:', EXPECTED_EPISODES, 'episodes;', EXPECTED_FRAMES, 'frames')
+assert FINETUNE_MODE in {'expert', 'full'}
+assert TRAIN_STEPS > 0 and SAVE_FREQ > 0
+print('W&B:', USE_WANDB, '| Fine-tune mode:', FINETUNE_MODE, '| Steps:', TRAIN_STEPS)
+
+CODE CELL at notebook position 5
+------------------------------------------------------------
+# Install before importing Torch or Transformers.
+assert 'torch' not in sys.modules and 'transformers' not in sys.modules, 'Start a fresh runtime and run from the top.'
+%pip install -q --upgrade pip
+%pip install -q --index-url https://download.pytorch.org/whl/cu126 "torch==2.7.1" "torchvision==0.22.1" "torchaudio==2.7.1"
+%pip install -q "lerobot[pi,training]==0.6.1" "torch==2.7.1" "torchvision==0.22.1" "torchcodec==0.3.0" "transformers==5.4.0" "av==15.1.0" matplotlib psutil
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+import importlib.metadata as md, torch, torchvision, av
+from lerobot.policies.pi05.configuration_pi05 import PI05Config
+from lerobot.policies.pi05.modeling_pi05 import PI05Policy
+assert torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+assert torch.__version__.startswith('2.7.1') and torchvision.__version__.startswith('0.22.1')
+assert md.version('lerobot') == '0.6.1' and md.version('transformers') == '5.4.0'
+assert av.__version__ == '15.1.0' and hasattr(av, 'option')
+assert torchvision.extension._has_ops()
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.set_float32_matmul_precision('high')
+runtime_report.update({name: md.version(name) for name in ('torch', 'torchvision', 'lerobot', 'transformers', 'accelerate', 'av', 'torchcodec')})
+runtime_report['cuda'] = torch.version.cuda
+print(json.dumps(runtime_report, indent=2))
+
+CODE CELL at notebook position 6
+------------------------------------------------------------
+# 3. Copy to local disk, verify every copied file, and retain a fingerprint report.
+import hashlib, shutil, tarfile
+from pathlib import PurePosixPath
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        while chunk := stream.read(16 * 1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+def tree_hashes(root):
+    root = Path(root)
+    return {str(p.relative_to(root)): sha256_file(p) for p in sorted(root.rglob('*')) if p.is_file()}
+
+def copy_verified_tree(source, destination):
+    source, destination = Path(source), Path(destination)
+    before = tree_hashes(source)
+    assert before, f'No files in {source}'
+    if destination.exists():
+        assert tree_hashes(destination) == before, f'Destination exists with different content: {destination}'
+        return before
+    staging = destination.with_name('.' + destination.name + '.copying')
+    assert not staging.exists(), f'Partial copy exists: {staging}. Inspect it before retrying.'
+    shutil.copytree(source, staging)
+    assert tree_hashes(staging) == before, f'Copy checksum failed: {staging}'
+    assert tree_hashes(source) == before, f'Source changed during copy: {source}'
+    staging.rename(destination)
+    return before
+
+assert shutil.disk_usage('/content').free >= 60 * 1024**3, 'Need at least 60 GiB free local disk before staging/training.'
+if folder_upload:
+    print('Copying dataset folder; verifying SHA-256 of every file ...')
+    dataset_file_hashes = copy_verified_tree(DATASET_DRIVE_FOLDER, LOCAL_DATASET)
+else:
+    expected_sha = DATASET_CHECKSUM.read_text().split()[0].lower()
+    assert len(expected_sha) == 64 and all(c in '0123456789abcdef' for c in expected_sha)
+    if not LOCAL_ARCHIVE.exists():
+        shutil.copy2(DATASET_ARCHIVE, LOCAL_ARCHIVE)
+    assert sha256_file(LOCAL_ARCHIVE) == expected_sha, 'Archive SHA-256 mismatch'
+    assert not LOCAL_DATASET.exists(), f'Local dataset already exists: {LOCAL_DATASET}; inspect before extracting.'
+    staging = Path('/content') / ('.' + DATASET_NAME + '.extracting')
+    staging.mkdir(exist_ok=False)
+    with tarfile.open(LOCAL_ARCHIVE, 'r:*') as archive:
+        members = archive.getmembers()
+        for member in members:
+            relative = PurePosixPath(member.name)
+            assert relative.parts and relative.parts[0] == DATASET_NAME, f'Unexpected archive root: {member.name}'
+            assert not relative.is_absolute() and '..' not in relative.parts
+            assert member.isfile() or member.isdir(), f'Unsupported archive entry: {member.name}'
+        archive.extractall(staging, members=members, filter='data')
+    (staging / DATASET_NAME).rename(LOCAL_DATASET)
+    staging.rmdir()
+    dataset_file_hashes = tree_hashes(LOCAL_DATASET)
+EXPECTED_METADATA_SHA256 = {'meta/info.json': 'de71d93083204c98babf100c8331061badae2df7aa1a3bf23de5e8deecfa4fdf', 'meta/ur5_vla_conversion.json': 'eda8704603a39667c9b540b966cb8efdfee54e8b7d2ab4f34765ca24de592d21'}
+for relative, expected in EXPECTED_METADATA_SHA256.items():
+    assert sha256_file(LOCAL_DATASET / relative) == expected, f'Dataset metadata differs from the reviewed 110-episode artifact: {relative}'
+for name in ('data', 'meta', 'videos'):
+    assert (LOCAL_DATASET / name).is_dir(), f'Missing local {name}'
+DATASET_HASH_REPORT = Path('/content') / f'{DATASET_NAME}_file_hashes.json'
+DATASET_HASH_REPORT.write_text(json.dumps(dataset_file_hashes, indent=2))
+print('COPY VERIFIED:', len(dataset_file_hashes), 'files;', LOCAL_DATASET)
+
+CODE CELL at notebook position 7
+------------------------------------------------------------
+# 4. Validate all state/action rows and decode three paired video samples per episode.
+import numpy as np
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+dataset = LeRobotDataset(REPO_ID, root=LOCAL_DATASET, video_backend='pyav')
+assert dataset.meta.total_episodes == EXPECTED_EPISODES
+assert dataset.meta.total_frames == EXPECTED_FRAMES == len(dataset)
+assert dataset.meta.fps == 20
+assert list(dataset.meta.tasks.index) == [TASK]
+features = dataset.meta.features
+JOINT_ORDER = ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint']
+for key in ('observation.images.base', 'observation.images.wrist'):
+    assert features[key]['dtype'] == 'video' and tuple(features[key]['shape']) == (480, 640, 3)
+assert tuple(features['observation.state']['shape']) == (7,)
+assert tuple(features['action']['shape']) == (7,)
+assert features['observation.state']['names'] == JOINT_ORDER + ['estimated_gripper_state']
+assert features['action']['names'] == JOINT_ORDER + ['gripper_command']
+conversion = json.loads((LOCAL_DATASET / 'meta/ur5_vla_conversion.json').read_text())
+assert conversion['action_semantics'] == 'six absolute joint-position targets plus absolute binary gripper command'
+assert conversion['action_mode'] == 'absolute' and conversion['joint_unit'] == 'radian'
+assert conversion['joint_order'] == JOINT_ORDER
+assert conversion['gripper_closed_value'] == 0.0 and conversion['gripper_open_value'] == 1.0
+assert conversion['gripper_is_measured'] is False
+assert len(conversion['source_episode_names']) == len(set(conversion['source_episode_names'])) == EXPECTED_EPISODES
+assert not {'episode_20261001_175654', 'episode_20261001_182413'} & set(conversion['source_episode_names'])
+
+rows_checked, episode_ids = 0, set()
+vectors = dataset.hf_dataset.select_columns(['observation.state', 'action', 'episode_index', 'task_index'])
+for batch in vectors.iter(batch_size=8192):
+    state = np.asarray(batch['observation.state'], dtype=np.float32)
+    action = np.asarray(batch['action'], dtype=np.float32)
+    assert state.ndim == 2 and state.shape == action.shape and state.shape[1] == 7
+    assert np.isfinite(state).all() and np.isfinite(action).all()
+    for gripper in (state[:, 6], action[:, 6]):
+        assert np.all(np.minimum(np.abs(gripper), np.abs(gripper - 1)) < 1e-5)
+    assert np.all(np.asarray(batch['task_index']) == 0)
+    episode_ids.update(np.asarray(batch['episode_index']).reshape(-1).tolist())
+    rows_checked += len(state)
+assert rows_checked == EXPECTED_FRAMES and episode_ids == set(range(EXPECTED_EPISODES))
+
+sample_count = 0
+for ep in range(EXPECTED_EPISODES):
+    info = dataset.meta.episodes[ep]
+    start, stop = int(info['dataset_from_index']), int(info['dataset_to_index'])
+    assert 0 <= start < stop <= EXPECTED_FRAMES
+    for index in sorted({start, (start + stop - 1) // 2, stop - 1}):
+        sample = dataset[index]
+        for key in ('observation.images.base', 'observation.images.wrist'):
+            image = np.asarray(sample[key])
+            assert image.shape == (3, 480, 640) and np.isfinite(image).all()
+        sample_count += 1
+    if (ep + 1) % 10 == 0:
+        print(f'Video validation: {ep + 1}/{EXPECTED_EPISODES} episodes')
+validation_report = {'episodes': EXPECTED_EPISODES, 'frames': rows_checked, 'fps': 20, 'task': TASK, 'paired_video_samples': sample_count, 'action_mode': 'absolute', 'validation': 'PASS', 'held_out_split': False}
+print(json.dumps(validation_report, indent=2))
+Path('/content/dataset_validation.json').write_text(json.dumps(validation_report, indent=2))
+# Show representative paired inputs before training.
+import matplotlib.pyplot as plt
+fig, axes = plt.subplots(2, 2, figsize=(10, 7))
+for row, index in enumerate((0, EXPECTED_FRAMES - 1)):
+    sample = dataset[index]
+    for col, key in enumerate(('observation.images.base', 'observation.images.wrist')):
+        axes[row, col].imshow(np.asarray(sample[key]).transpose(1, 2, 0))
+        axes[row, col].set_title(f'{key.rsplit(".", 1)[-1]} — frame {index}')
+        axes[row, col].axis('off')
+plt.tight_layout(); plt.show()
+# Pi0.5's tokenizer expects quantile-normalized state. Keep the reviewed stats.
+stats = dataset.meta.stats
+quantile_report = {}
+for key in ('observation.state', 'action'):
+    assert 'q01' in stats[key] and 'q99' in stats[key], f'Quantile stats missing: {key}'
+    low, high = (np.asarray(stats[key][name]).reshape(-1) for name in ('q01', 'q99'))
+    assert low.shape == high.shape == (7,)
+    assert np.isfinite(low).all() and np.isfinite(high).all() and np.all(high >= low)
+    # Histogram-estimated quantiles can differ slightly from exact binary endpoints.
+    assert np.isclose(low[6], 0, atol=1e-5, rtol=0) and np.isclose(high[6], 1, atol=1e-5, rtol=0), 'Both gripper states must be represented in the quantiles'
+    quantile_report[key] = {'q01': low.tolist(), 'q99': high.tolist()}
+validation_report['normalization'] = 'QUANTILES for STATE/ACTION; IDENTITY for VISUAL'
+validation_report['quantiles'] = quantile_report
+print('Pi0.5 quantile statistics verified')
+Path('/content/dataset_validation.json').write_text(json.dumps(validation_report, indent=2))
+
+CODE CELL at notebook position 8
+------------------------------------------------------------
+# Authenticate without embedding tokens in notebook source or reports.
+from google.colab import userdata
+from getpass import getpass
+from huggingface_hub import HfApi, get_token, login as hf_login, snapshot_download
+from transformers import AutoTokenizer
+
+def authenticate_hugging_face():
+    try:
+        token = userdata.get('HF_TOKEN')
+    except Exception as error:
+        print(f'Colab secret unavailable ({type(error).__name__}); checking existing login.')
+        token = None
+    token = (token or get_token() or '').strip()
+    if not token:
+        print('Create a read token at https://huggingface.co/settings/tokens')
+        print('Accept tokenizer access at https://huggingface.co/google/paligemma-3b-pt-224 using the same account.')
+        token = getpass('Hugging Face read token (hidden input): ').strip()
+    if not token:
+        raise ValueError('No token entered. Add HF_TOKEN in Colab Secrets or rerun this cell and use the hidden prompt.')
+    hf_login(token=token, add_to_git_credential=False)
+    # Downloads tokenizer files only. Access must work before the large model download.
+    try:
+        tokenizer = AutoTokenizer.from_pretrained('google/paligemma-3b-pt-224', token=token)
+    except OSError:
+        raise RuntimeError('Tokenizer download failed. Confirm this token can read google/paligemma-3b-pt-224, accept its license with the same account, and check connectivity. Then rerun this cell.') from None
+    assert tokenizer('test')['input_ids'], 'Tokenizer returned no tokens'
+    print('Hugging Face login and PaliGemma tokenizer verified.')
+
+authenticate_hugging_face()
+BASE_MODEL = 'lerobot/pi05_base'
+MODEL_REVISION = HfApi().model_info(BASE_MODEL).sha
+assert MODEL_REVISION
+print('Tokenizer access verified. Caching base weights at revision:', MODEL_REVISION)
+# Resolve a fixed revision once, then reuse this exact local snapshot in every subprocess.
+BASE_MODEL_PATH = snapshot_download(BASE_MODEL, revision=MODEL_REVISION, allow_patterns=['*.json', '*.safetensors'])
+for name in ('config.json', 'model.safetensors', 'policy_preprocessor.json', 'policy_postprocessor.json'):
+    assert (Path(BASE_MODEL_PATH) / name).is_file(), f'Missing base model artifact: {name}'
+assert json.loads((Path(BASE_MODEL_PATH) / 'config.json').read_text())['type'] == 'pi05'
+WANDB_PROJECT = 'pi05_ur5_cube_110ep_v3_a100'
+if USE_WANDB:
+    import wandb
+    wandb.login()
+print('W&B:', WANDB_PROJECT if USE_WANDB else 'disabled')
+
+CODE CELL at notebook position 10
+------------------------------------------------------------
+SEED = 42
+TRAIN_EXPERT_ONLY = FINETUNE_MODE == 'expert'
+NORMALIZATION = {'STATE': 'QUANTILES', 'ACTION': 'QUANTILES', 'VISUAL': 'IDENTITY'}
+def policy_arguments():
+    return [
+        '--policy.type=pi05', f'--policy.pretrained_path={BASE_MODEL_PATH}',
+        '--policy.device=cuda', '--policy.dtype=bfloat16', '--policy.use_amp=false',
+        '--policy.use_relative_actions=false', '--policy.gradient_checkpointing=true',
+        '--policy.compile_model=false', '--policy.push_to_hub=false',
+        '--policy.chunk_size=50', '--policy.n_action_steps=50', '--policy.empty_cameras=1',
+        f'--policy.train_expert_only={str(TRAIN_EXPERT_ONLY).lower()}',
+        f'--policy.freeze_vision_encoder={str(TRAIN_EXPERT_ONLY).lower()}',
+        '--policy.normalization_mapping=' + json.dumps(NORMALIZATION, separators=(',', ':')),
+    ]
+def dataset_arguments():
+    return [f'--dataset.repo_id={REPO_ID}', f'--dataset.root={LOCAL_DATASET}',
+            '--dataset.video_backend=pyav', '--dataset.image_transforms.enable=false',
+            '--dataset.eval_split=0.0', '--env_eval_freq=0', '--eval_steps=0']
+# 6. Benchmark stable batches and choose the fastest one within the memory reserve.
+import re, statistics, subprocess, threading
+
+BATCH_CANDIDATES = [1, 2, 4, 8, 16, 24] if FINETUNE_MODE == 'expert' else [1, 2, 4]
+BENCHMARK_STEPS = 6
+NUM_WORKERS = max(1, min(8, (os.cpu_count() or 2) - 2))
+GPU_MEMORY_LIMIT_MIB = int(runtime_report["memory_mib"] * 0.88)
+BENCHMARK_ROOT = Path("/content") / f"{DATASET_NAME}_benchmarks_{RUN_TAG}"
+assert not BENCHMARK_ROOT.exists(), "Benchmark directory already exists; inspect before rerunning"
+BENCHMARK_ROOT.mkdir()
+
+def gpu_sample():
+    text = output(["nvidia-smi", "--query-gpu=memory.used,utilization.gpu", "--format=csv,noheader,nounits"])
+    memory, utilization = [int(float(value.strip())) for value in text.split(",")[:2]]
+    return memory, utilization
+
+def benchmark(batch_size):
+    run_dir = BENCHMARK_ROOT / f"batch_{batch_size}"
+    command = [
+        'lerobot-train', *policy_arguments(), *dataset_arguments(),
+        f'--batch_size={batch_size}', f'--num_workers={NUM_WORKERS}', f'--seed={SEED}',
+        '--wandb.enable=false', '--save_checkpoint=false',
+        f'--steps={BENCHMARK_STEPS}', '--log_freq=1', f'--output_dir={run_dir}',
+        f'--job_name=pi05_bench_b{batch_size}',
+    ]
+    samples, lines, stop = [], [], threading.Event()
+    def monitor():
+        while not stop.wait(0.25):
+            try: samples.append(gpu_sample())
+            except Exception: pass
+    thread = threading.Thread(target=monitor, daemon=True); thread.start()
+    started = time.time()
+    process = None
+    try:
+        process = subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1)
+        for line in process.stdout:
+            print(f"[batch {batch_size}] {line}", end="")
+            lines.append(line)
+        code = process.wait()
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill(); process.wait()
+        stop.set(); thread.join(timeout=2)
+        (BENCHMARK_ROOT / f"batch_{batch_size}.log").write_text("".join(lines))
+    text = "".join(lines)
+    update_times = [float(value) for value in re.findall(r"updt_s:\s*([0-9.]+)", text)]
+    stable_times = update_times[len(update_times)//2:]
+    peak_memory = max((item[0] for item in samples), default=0)
+    utilization_samples = [item[1] for item in samples]
+    median_util = statistics.median(utilization_samples) if utilization_samples else 0
+    throughput = batch_size / statistics.median(stable_times) if stable_times and code == 0 else 0.0
+    result = {"batch_size": batch_size, "success": code == 0, "peak_memory_mib": peak_memory, "median_gpu_utilization": median_util, "examples_per_second": throughput, "elapsed_s": time.time() - started}
+    if code != 0:
+        result["error_tail"] = "\n".join(text.splitlines()[-40:])
+    (BENCHMARK_ROOT / f"batch_{batch_size}.log").write_text(text)
+    shutil.rmtree(run_dir, ignore_errors=True)
+    return result
+
+benchmark_results = []
+for candidate in BATCH_CANDIDATES:
+    result = benchmark(candidate); benchmark_results.append(result); print(json.dumps(result, indent=2))
+    if not result["success"]:
+        error = result.get('error_tail', '').lower()
+        if 'out of memory' in error:
+            break
+        raise RuntimeError('Pi0.5 probe failed for a non-memory reason: ' + result.get('error_tail', 'No log'))
+eligible = [item for item in benchmark_results if item["success"] and 0 < item["peak_memory_mib"] <= GPU_MEMORY_LIMIT_MIB and item["examples_per_second"] > 0]
+assert eligible, f"No measured batch met the reserve/throughput requirements. Inspect benchmark errors: {benchmark_results}"
+selected = max(eligible, key=lambda item: item["examples_per_second"])
+BATCH_SIZE = selected["batch_size"]
+print("SELECTED BATCH", BATCH_SIZE, json.dumps(selected, indent=2))
+
+CODE CELL at notebook position 11
+------------------------------------------------------------
+# Resolve the run budget and preserve reproducibility information.
+import random
+WARMUP_STEPS = min(1000, max(1, TRAIN_STEPS // 20))
+APPROX_DATASET_PASSES = TRAIN_STEPS * BATCH_SIZE / dataset.meta.total_frames
+ESTIMATED_TRAIN_HOURS = TRAIN_STEPS * BATCH_SIZE / selected['examples_per_second'] / 3600
+RUN_NAME = f'{DATASET_NAME}_pi05_{FINETUNE_MODE}_a100_b{BATCH_SIZE}_{TRAIN_STEPS}_steps_{RUN_TAG}'
+TRAIN_OUTPUT = Path('/content/outputs') / RUN_NAME
+LOCAL_REPORT_DIR = Path('/content/training_reports') / RUN_NAME
+DRIVE_RUN_DIR = CHECKPOINT_ROOT / RUN_NAME
+DRIVE_CHECKPOINTS_DIR = DRIVE_RUN_DIR / 'checkpoints'
+assert not TRAIN_OUTPUT.exists() and not DRIVE_RUN_DIR.exists(), 'Run already exists; choose a new run tag.'
+assert shutil.disk_usage('/content').free >= 40 * 1024**3, 'Need 40 GiB local headroom after staging data and model.'
+LOCAL_REPORT_DIR.mkdir(parents=True, exist_ok=False)
+random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED)
+TRAIN_ARGS = [
+    'lerobot-train', *policy_arguments(), *dataset_arguments(),
+    f'--policy.scheduler_warmup_steps={WARMUP_STEPS}', f'--policy.scheduler_decay_steps={TRAIN_STEPS}',
+    f'--batch_size={BATCH_SIZE}', f'--num_workers={NUM_WORKERS}', f'--seed={SEED}',
+    f'--wandb.enable={str(USE_WANDB).lower()}', f'--wandb.project={WANDB_PROJECT}',
+    '--save_checkpoint=true', f'--steps={TRAIN_STEPS}', f'--save_freq={SAVE_FREQ}',
+    '--log_freq=10', f'--output_dir={TRAIN_OUTPUT}', f'--job_name={RUN_NAME}',
+]
+resolved = {'policy': 'pi05', 'base_model': BASE_MODEL, 'model_revision': MODEL_REVISION,
+    'dataset': DATASET_NAME, 'episodes': dataset.meta.total_episodes, 'frames': dataset.meta.total_frames,
+    'finetune_mode': FINETUNE_MODE, 'batch_size': BATCH_SIZE, 'steps': TRAIN_STEPS, 'save_freq': SAVE_FREQ,
+    'approx_dataset_passes': APPROX_DATASET_PASSES, 'estimated_compute_hours': ESTIMATED_TRAIN_HOURS,
+    'action_mode': 'absolute', 'normalization': NORMALIZATION, 'seed': SEED, 'runtime': runtime_report,
+    'validation': validation_report, 'benchmark_results': benchmark_results, 'command': TRAIN_ARGS,
+    'drive_checkpoint_retention': 'all', 'local_checkpoint_retention': LOCAL_CHECKPOINTS_TO_KEEP}
+(LOCAL_REPORT_DIR / 'resolved_training_config.json').write_text(json.dumps(resolved, indent=2))
+(LOCAL_REPORT_DIR / 'dataset_file_hashes.json').write_text(DATASET_HASH_REPORT.read_text())
+(LOCAL_REPORT_DIR / 'dataset_stats.json').write_text((LOCAL_DATASET / 'meta/stats.json').read_text())
+(LOCAL_REPORT_DIR / 'pip_freeze.txt').write_text(output([sys.executable, '-m', 'pip', 'freeze']))
+shutil.copytree(BENCHMARK_ROOT, LOCAL_REPORT_DIR / 'batch_benchmarks')
+print(json.dumps(resolved, indent=2))
+print(f'Estimated training compute: {ESTIMATED_TRAIN_HOURS:.1f} h; checkpoint copies add time. Colab sessions can end before completion.')
+
+CODE CELL at notebook position 13
+------------------------------------------------------------
+# 8. Train and automatically preserve complete artifacts and final export.
+import csv
+TRAIN_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+TRAIN_LOG = LOCAL_REPORT_DIR / 'training.log'
+GPU_LOG = LOCAL_REPORT_DIR / 'gpu_metrics.csv'
+DRIVE_RUN_DIR.mkdir(parents=True, exist_ok=False)
+DRIVE_CHECKPOINTS_DIR.mkdir()
+for filename in ('resolved_training_config.json', 'dataset_file_hashes.json', 'dataset_stats.json', 'pip_freeze.txt'):
+    shutil.copy2(LOCAL_REPORT_DIR / filename, DRIVE_RUN_DIR / filename)
+
+REQUIRED_CHECKPOINT_FILES = (
+    'pretrained_model/model.safetensors', 'pretrained_model/config.json',
+    'pretrained_model/train_config.json', 'pretrained_model/policy_preprocessor.json',
+    'pretrained_model/policy_postprocessor.json', 'training_state/training_step.json',
+    'training_state/optimizer_state.safetensors', 'training_state/optimizer_param_groups.json',
+    'training_state/rng_state.safetensors', 'training_state/scheduler_state.json',
+)
+
+def checkpoint_complete(path):
+    return path.is_dir() and all((path / name).is_file() and (path / name).stat().st_size > 0 for name in REQUIRED_CHECKPOINT_FILES)
+
+def prune_verified_local_checkpoints(checkpoint_dir):
+    completed = sorted((p for p in checkpoint_dir.iterdir() if p.name.isdigit() and p.name in synced_steps), key=lambda p: int(p.name))
+    for old in completed[:-LOCAL_CHECKPOINTS_TO_KEEP]:
+        # Verify the persistent copy again before deleting this run's local copy.
+        assert tree_hashes(old) == tree_hashes(DRIVE_CHECKPOINTS_DIR / old.name), f'Drive copy changed: {old.name}'
+        shutil.rmtree(old)
+
+synced_steps = set()
+def sync_checkpoints():
+    checkpoint_dir = TRAIN_OUTPUT / 'checkpoints'
+    last = checkpoint_dir / 'last'
+    if not last.is_symlink() or not last.exists():
+        return
+    latest_name = last.resolve().name
+    if not latest_name.isdigit():
+        raise RuntimeError(f'Unexpected completed-checkpoint pointer: {last}')
+    for source in sorted(checkpoint_dir.iterdir()):
+        if not source.name.isdigit() or int(source.name) > int(latest_name) or source.name in synced_steps:
+            continue
+        if not checkpoint_complete(source):
+            raise RuntimeError(f'Completed checkpoint is missing required artifacts: {source}')
+        target = DRIVE_CHECKPOINTS_DIR / source.name
+        hashes = copy_verified_tree(source, target)
+        (DRIVE_RUN_DIR / f'checkpoint_{source.name}_sha256.json').write_text(json.dumps(hashes, indent=2))
+        synced_steps.add(source.name)
+        print('SYNCED COMPLETE CHECKPOINT TO DRIVE:', target, flush=True)
+    prune_verified_local_checkpoints(checkpoint_dir)
+
+monitor_stop = threading.Event()
+def gpu_monitor():
+    with GPU_LOG.open('w', newline='') as stream:
+        writer = csv.writer(stream)
+        writer.writerow(['time_s', 'memory_mib', 'utilization_percent'])
+        started = time.time()
+        while not monitor_stop.wait(2.0):
+            try:
+                memory, utilization = gpu_sample()
+                writer.writerow([time.time() - started, memory, utilization]); stream.flush()
+            except Exception:
+                pass
+
+monitor_thread = threading.Thread(target=gpu_monitor, daemon=True)
+monitor_thread.start()
+process = None
+try:
+    with TRAIN_LOG.open('w') as log:
+        process = subprocess.Popen(TRAIN_ARGS, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1)
+        for line_count, line in enumerate(process.stdout, 1):
+            print(line, end=''); log.write(line); log.flush()
+            sync_checkpoints()
+            if line_count % 100 == 0:
+                shutil.copy2(TRAIN_LOG, DRIVE_RUN_DIR / 'training_in_progress.log')
+        return_code = process.wait()
+finally:
+    if process is not None and process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            process.kill(); process.wait()
+    monitor_stop.set(); monitor_thread.join(timeout=5)
+    for filename in ('training.log', 'gpu_metrics.csv'):
+        source = LOCAL_REPORT_DIR / filename
+        if source.exists():
+            shutil.copy2(source, DRIVE_RUN_DIR / filename)
+    sync_checkpoints()
+assert return_code == 0, f'Training failed ({return_code}); inspect {TRAIN_LOG}'
+models = [p for p in (TRAIN_OUTPUT / 'checkpoints').iterdir() if p.name.isdigit() and checkpoint_complete(p)]
+assert models, 'No complete numbered checkpoint found'
+final_checkpoint = max(models, key=lambda p: int(p.name))
+assert int(final_checkpoint.name) == TRAIN_STEPS, f'Final step missing: {final_checkpoint}'
+FINAL_MODEL = final_checkpoint / 'pretrained_model'
+final_target = DRIVE_RUN_DIR / 'pretrained_model'
+model_hashes = copy_verified_tree(FINAL_MODEL, final_target)
+(DRIVE_RUN_DIR / 'pretrained_model_sha256.json').write_text(json.dumps(model_hashes, indent=2))
+
+export_archive = DEPLOYMENT_ROOT / f'{RUN_NAME}_complete_checkpoint.tar'
+assert not export_archive.exists(), f'Export already exists: {export_archive}'
+export_staging = export_archive.with_name('.' + export_archive.name + '.copying')
+assert not export_staging.exists(), f'Partial export exists: {export_staging}'
+with tarfile.open(export_staging, 'w') as archive:
+    archive.add(final_target, arcname='pretrained_model')
+# Verify every archived regular file against the model directory before finalizing.
+with tarfile.open(export_staging, 'r:') as archive:
+    archive_hashes = {}
+    for member in archive.getmembers():
+        if not member.isfile():
+            continue
+        relative = PurePosixPath(member.name).relative_to('pretrained_model').as_posix()
+        digest = hashlib.sha256()
+        with archive.extractfile(member) as stream:
+            while chunk := stream.read(16 * 1024 * 1024):
+                digest.update(chunk)
+        archive_hashes[relative] = digest.hexdigest()
+assert archive_hashes == model_hashes, 'Export file verification failed'
+export_staging.rename(export_archive)
+archive_sha256 = sha256_file(export_archive)
+Path(f'{export_archive}.sha256').write_text(f'{archive_sha256}  {export_archive.name}\n')
+copy_verified_tree(LOCAL_REPORT_DIR, REPORT_ROOT / RUN_NAME)
+print('TRAINING COMPLETE:', RUN_NAME)
+print('TRAINED WEIGHTS SAVED TO DRIVE:', final_target)
+print('READY TO DOWNLOAD:', export_archive)
+print('SHA-256:', archive_sha256)
+
+CODE CELL at notebook position 14
+------------------------------------------------------------
+# 9. Optional: inspect actual GPU utilization after the automatic export.
+import matplotlib.pyplot as plt, pandas as pd
+metrics = pd.read_csv(GPU_LOG)
+if len(metrics):
+    fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
+    axes[0].plot(metrics.time_s / 60, metrics.utilization_percent)
+    axes[0].set_ylabel('GPU utilization %'); axes[0].set_ylim(0, 105); axes[0].grid()
+    axes[1].plot(metrics.time_s / 60, metrics.memory_mib / 1024)
+    axes[1].set_ylabel('VRAM GiB'); axes[1].set_xlabel('Minutes'); axes[1].grid()
+    plt.tight_layout(); plt.show()
+    gpu_summary = {'median_gpu_utilization': float(metrics.utilization_percent.median()), 'p95_gpu_utilization': float(metrics.utilization_percent.quantile(0.95)), 'peak_vram_gib': float(metrics.memory_mib.max() / 1024)}
+    (DRIVE_RUN_DIR / 'gpu_summary.json').write_text(json.dumps(gpu_summary, indent=2))
+    print(json.dumps(gpu_summary, indent=2))
+else:
+    print('Training finished before a GPU monitor sample was recorded.')
+
+CODE CELL at notebook position 15
+------------------------------------------------------------
+# 10. Locate the exported model and its checksum. No extra copy cell is required.
+print('Final model:', DRIVE_RUN_DIR / 'pretrained_model')
+print('All retained numbered checkpoints:', DRIVE_CHECKPOINTS_DIR)
+print('Download archive:', export_archive)
+print('Checksum file:', Path(f'{export_archive}.sha256'))
+assert (DRIVE_RUN_DIR / 'pretrained_model/model.safetensors').is_file()
+assert export_archive.is_file() and Path(f'{export_archive}.sha256').is_file()
+
+================================================================================
+notebooks/train_ur5_cube_110ep_openvla_a100_40gb.ipynb
+================================================================================
+
+CODE CELL at notebook position 2
+------------------------------------------------------------
+# 1. Verify the GPU before downloading packages or model weights.
+import os, sys, json, subprocess, shutil, hashlib, time, signal
+from pathlib import Path
+
+if sys.platform != 'linux':
+    raise RuntimeError('Use a Linux NVIDIA GPU notebook runtime.')
+gpu_lines = subprocess.check_output([
+    'nvidia-smi', '--query-gpu=name,memory.total', '--format=csv,noheader,nounits'
+], text=True).strip().splitlines()
+name, memory_mib = [x.strip() for x in gpu_lines[0].rsplit(',', 1)]
+print('Selected GPU 0:', name, memory_mib, 'MiB')
+if 'A100' not in name or int(memory_mib) < 35840:
+    raise RuntimeError('Select an A100 40 GB runtime, then reconnect. No training was started.')
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+print('GPU capacity check passed.')
+
+CODE CELL at notebook position 3
+------------------------------------------------------------
+# 2. Configure source data and a PERSISTENT output location.
+IN_COLAB = 'google.colab' in sys.modules
+try:
+    from google.colab import drive
+except ImportError:
+    IN_COLAB = False
+else:
+    IN_COLAB = True
+    drive.mount('/content/drive')
+
+WORK_ROOT = Path('/content/openvla_ur5') if IN_COLAB else Path.cwd() / 'openvla_ur5_work'
+WORK_ROOT.mkdir(parents=True, exist_ok=True)
+# This is the same Drive dataset location used by the previous training notebooks.
+DRIVE_ROOT = Path('/content/drive/MyDrive/VLA_Thesis/Sorted VLA Backup Final/pHYSICAL UR5')
+DATASET_SOURCE_DIR = DRIVE_ROOT / 'datasets/lerobot/ur5_cube_110ep_v3' if IN_COLAB else Path('/workspace/datasets/ur5_cube_110ep_v3')
+DATASET_ARCHIVE = DRIVE_ROOT / 'datasets/lerobot/ur5_cube_110ep_v3.tar' if IN_COLAB else Path('/workspace/datasets/ur5_cube_110ep_v3.tar')
+# For a provider other than Colab, EDIT SAVE_ROOT to its mounted persistent volume.
+SAVE_ROOT = DRIVE_ROOT / 'checkpoints/ur5_openvla_trained' if IN_COLAB else Path('/workspace/persistent/openvla_ur5')
+RUN_NAME = 'ur5_cube_110ep_openvla_lora32_b16_20000_steps_a10040_b16a1_v2'
+OUTPUT = SAVE_ROOT / RUN_NAME
+LOCAL_DATASET = WORK_ROOT / 'ur5_cube_110ep_v3'
+CACHE = WORK_ROOT / 'prepared_base_rgb'
+CODE = WORK_ROOT / 'code'
+VENV = WORK_ROOT / 'env'
+TRAIN_STEPS, BATCH_SIZE, ACCUMULATE, SAVE_EVERY = 20000, 16, 1, 250
+MIN_GPU_MEMORY_GIB = 35
+WANDB_ENTITY = 'mdshafakat-masud-ontario-tech-university'
+WANDB_PROJECT = 'ur5-experiment1-openvla'
+
+required_gib = 20 if (CACHE / 'manifest.json').exists() and VENV.exists() else 100
+if shutil.disk_usage(WORK_ROOT).free < required_gib * 1024**3:
+    raise RuntimeError(f'Need at least {required_gib} GiB free local disk for this setup/resume.')
+SAVE_ROOT.mkdir(parents=True, exist_ok=True)
+print('Dataset folder:', DATASET_SOURCE_DIR)
+print('Alternative dataset archive:', DATASET_ARCHIVE)
+print('Persistent run folder:', OUTPUT)
+print('Verify that SAVE_ROOT survives runtime termination before proceeding.')
+
+CODE CELL at notebook position 4
+------------------------------------------------------------
+[Embedded source extraction cell: run the original notebook cell; encoded archive omitted from this text reference.]
+
+CODE CELL at notebook position 5
+------------------------------------------------------------
+# 4. Create an isolated Python 3.10 environment, including on newer Colab kernels.
+# Kernel packages and existing robot/ML environments are not modified.
+def run(command, env=None, log=None):
+    process = subprocess.Popen([str(x) for x in command], stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True, bufsize=1, env=env)
+    log_file = Path(log).open('a') if log else None
+    try:
+        try:
+            for line in process.stdout:
+                print(line, end='', flush=True)
+                if log_file:
+                    log_file.write(line)
+                    log_file.flush()
+        except KeyboardInterrupt:
+            if process.poll() is None:
+                print('Requesting graceful stop; wait for CHECKPOINT SAVED before closing.')
+                process.send_signal(signal.SIGUSR1)
+                for line in process.stdout:
+                    print(line, end='', flush=True)
+                    if log_file:
+                        log_file.write(line)
+            process.wait()
+            raise
+        status = process.wait()
+        if status:
+            raise RuntimeError(f'Process exited with status {status}; inspect the error above.')
+    finally:
+        if log_file:
+            log_file.close()
+
+BOOTSTRAP = WORK_ROOT / 'bootstrap'
+uv_binary = BOOTSTRAP / 'bin/uv'
+if not uv_binary.exists():
+    run([sys.executable, '-m', 'pip', 'install', '--target', BOOTSTRAP, 'uv==0.9.8'])
+CHILD_ENV = os.environ.copy()
+CHILD_ENV.update({'UV_PYTHON_INSTALL_DIR': str(WORK_ROOT / 'python'),
+                  'UV_CACHE_DIR': str(WORK_ROOT / 'uv_cache'),
+                  'HF_HOME': str(WORK_ROOT / 'hf_cache'),
+                  'TOKENIZERS_PARALLELISM': 'false', 'CUDA_VISIBLE_DEVICES': '0'})
+PYTHON = VENV / 'bin/python'
+if not PYTHON.exists():
+    run([uv_binary, 'python', 'install', '3.10'], env=CHILD_ENV)
+    run([uv_binary, 'venv', '--seed', '--python', '3.10', VENV], env=CHILD_ENV)
+run([uv_binary, 'pip', 'install', '--python', PYTHON,
+     'torch==2.2.2', 'torchvision==0.17.2', '--index-url',
+     'https://download.pytorch.org/whl/cu121'], env=CHILD_ENV)
+run([uv_binary, 'pip', 'install', '--python', PYTHON, '-r', CODE / 'requirements.txt'], env=CHILD_ENV)
+run([PYTHON, '-c',
+     'import torch,transformers,peft,timm,av; '
+     'print("Torch:",torch.__version__,"Transformers:",transformers.__version__); '
+     'assert torch.cuda.is_available() and torch.cuda.is_bf16_supported(); '
+     'print("GPU:",torch.cuda.get_device_name(0))'], env=CHILD_ENV)
+
+CODE CELL at notebook position 6
+------------------------------------------------------------
+# 5. Stage the reviewed dataset on local SSD; verify its actual file hashes.
+import tarfile
+from pathlib import PurePosixPath
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with Path(path).open('rb') as f:
+        for block in iter(lambda: f.read(8*1024**2), b''):
+            h.update(block)
+    return h.hexdigest()
+
+reviewed = json.loads((CODE / 'reviewed_source.json').read_text())
+if not LOCAL_DATASET.exists():
+    staging = WORK_ROOT / ('.staging-' + str(time.time_ns()))
+    staging.mkdir()
+    if DATASET_SOURCE_DIR.is_dir():
+        shutil.copytree(DATASET_SOURCE_DIR, staging / LOCAL_DATASET.name)
+    elif DATASET_ARCHIVE.is_file():
+        # Reject links and paths outside the one expected dataset root.
+        with tarfile.open(DATASET_ARCHIVE, 'r:*') as archive:
+            members = archive.getmembers()
+            for member in members:
+                p = PurePosixPath(member.name)
+                if (not p.parts or p.parts[0] != LOCAL_DATASET.name or
+                    p.is_absolute() or '..' in p.parts or
+                    not (member.isfile() or member.isdir())):
+                    raise ValueError(f'Unsafe or unexpected dataset archive member: {member.name}')
+            archive.extractall(staging, members=members)
+    else:
+        raise FileNotFoundError('Set DATASET_SOURCE_DIR or DATASET_ARCHIVE to the reviewed 110-episode dataset.')
+    (staging / LOCAL_DATASET.name).rename(LOCAL_DATASET)
+    staging.rmdir()
+for i, (relative, expected) in enumerate(reviewed['sha256'].items(), 1):
+    if sha256_file(LOCAL_DATASET / relative) != expected:
+        raise ValueError(f'Source artifact checksum mismatch: {relative}')
+    if i % 10 == 0:
+        print('Verified dataset files:', i, '/', len(reviewed['sha256']))
+print('All reviewed dataset file checksums match.')
+run([PYTHON, CODE / 'prepare_data.py', '--dataset', LOCAL_DATASET, '--cache', CACHE], env=CHILD_ENV)
+
+CODE CELL at notebook position 7
+------------------------------------------------------------
+# 6. Read Colab Secrets. Enable Notebook access in Colab's Secrets panel.
+# Secret names: WANDB_API_KEY (required for online graphs), HF_TOKEN (optional).
+# Values stay in child-process environment variables and are never printed.
+from getpass import getpass
+
+def runtime_secret(name, required=False):
+    existing = CHILD_ENV.get(name, '').strip()
+    if existing:
+        return existing
+    if IN_COLAB:
+        from google.colab import userdata
+        try:
+            value = userdata.get(name).strip()
+        except userdata.SecretNotFoundError:
+            if not required:
+                return ''
+        except userdata.NotebookAccessError:
+            raise RuntimeError(f'Enable Notebook access for {name} in Colab Secrets, then rerun this cell.') from None
+        except userdata.TimeoutException:
+            raise RuntimeError('Run this cell from the Colab notebook UI to access Secrets.') from None
+        else:
+            if value or not required:
+                return value
+    return getpass(f'{name} (hidden; Enter uses existing credentials or skips optional token): ').strip()
+
+key = runtime_secret('WANDB_API_KEY', required=True)
+if key:
+    CHILD_ENV['WANDB_API_KEY'] = key
+del key
+token = runtime_secret('HF_TOKEN')
+if token:
+    CHILD_ENV['HF_TOKEN'] = token
+del token
+run([PYTHON, '-c', 'import wandb; wandb.login(verify=True)'], env=CHILD_ENV)
+print('W&B project: https://wandb.ai/' + WANDB_ENTITY + '/' + WANDB_PROJECT)
+print('Full training will create/resume its own run and print the live run URL.')
+print('Charts include train/loss, train/learning_rate, action-token accuracy, joint MAE and GPU memory.')
+
+CODE CELL at notebook position 8
+------------------------------------------------------------
+# 7. Real memory/update/save test, followed by a fresh-process resume test.
+def training_command(output, probe=False):
+    command = [PYTHON, '-u', CODE / 'train.py', '--cache', CACHE, '--output', output,
+               '--steps', str(TRAIN_STEPS), '--batch-size', str(BATCH_SIZE),
+               '--accumulate', str(ACCUMULATE), '--save-every', str(SAVE_EVERY),
+               '--min-gpu-memory-gib', str(MIN_GPU_MEMORY_GIB),
+               '--wandb-entity', WANDB_ENTITY, '--wandb-project', WANDB_PROJECT]
+    return command + (['--probe'] if probe else [])
+
+PROBE = WORK_ROOT / f'probe_b{BATCH_SIZE}_a{ACCUMULATE}'
+run(training_command(PROBE, probe=True), env=CHILD_ENV)
+first = json.loads((PROBE / 'status.json').read_text())
+if first['phase'] != 'probe_passed' or first['step'] != 2:
+    raise RuntimeError('The two-update probe did not finish.')
+run(training_command(PROBE, probe=True), env=CHILD_ENV)
+second = json.loads((PROBE / 'status.json').read_text())
+if second['phase'] != 'probe_passed' or not second['resume_checkpoint_loaded']:
+    raise RuntimeError('Fresh-process checkpoint resume was not verified.')
+OUTPUT.mkdir(parents=True, exist_ok=True)
+(OUTPUT / 'probe_report.json').write_text(json.dumps(second, indent=2))
+PROBE_PASSED = True
+print('MEMORY, OPTIMIZER UPDATE, CHECKPOINT AND COLD-RESUME CHECKS PASSED.')
+print('If the probe runs out of memory, lower BATCH_SIZE and raise ACCUMULATE to retain batch 16, then repeat.')
+
+CODE CELL at notebook position 9
+------------------------------------------------------------
+# 8. START / RESUME FULL TRAINING. This cell stays active while training runs.
+# A same-name, same-settings run resumes its newest COMPLETE checkpoint automatically.
+# To pause, interrupt this cell ONCE and wait for the graceful checkpoint-save message.
+# Runtime crashes can lose up to 249 updates; existing completed checkpoints remain usable.
+assert PROBE_PASSED, 'Complete the memory and cold-resume probe first.'
+print('Starting original OpenVLA LoRA training on all 110 episodes.')
+print('Use the LIVE W&B URL printed below to view the graphs during this cell.')
+print('Persistent output:', OUTPUT)
+run(training_command(OUTPUT), env=CHILD_ENV, log=OUTPUT / 'terminal.log')
+
+CODE CELL at notebook position 10
+------------------------------------------------------------
+# 9. Inspect completion or pause state and the latest checkpoint.
+state = json.loads((OUTPUT / 'status.json').read_text())
+print(json.dumps(state, indent=2))
+pointer = OUTPUT / 'latest_checkpoint.json'
+if pointer.exists():
+    print('Latest complete checkpoint:', pointer.read_text())
+if state.get('wandb_url'):
+    from IPython.display import display, HTML
+    display(HTML('<a target="_blank" href="' + state['wandb_url'] + '">Open training graphs in W&B</a>'))
+if state['phase'] == 'finished':
+    print('Training is complete. The checkpoint contains a LoRA adapter plus optimizer/RNG state.')
+    print('It is not a standalone merged model; load it with the pinned base model and saved normalization.')
+    print('No robot execution setup was changed. A separate read-only inference check is needed before deployment.')
+
+================================================================================
+notebooks/train_ur5_cube_110ep_openvla_a100_80gb.ipynb
+================================================================================
+
+CODE CELL at notebook position 2
+------------------------------------------------------------
+# 1. Verify the GPU before downloading packages or model weights.
+import os, sys, json, subprocess, shutil, hashlib, time, signal
+from pathlib import Path
+
+if sys.platform != 'linux':
+    raise RuntimeError('Use a Linux NVIDIA GPU notebook runtime.')
+gpu_lines = subprocess.check_output([
+    'nvidia-smi', '--query-gpu=name,memory.total', '--format=csv,noheader,nounits'
+], text=True).strip().splitlines()
+name, memory_mib = [x.strip() for x in gpu_lines[0].rsplit(',', 1)]
+print('Selected GPU 0:', name, memory_mib, 'MiB')
+if 'A100' not in name or int(memory_mib) < 76800:
+    raise RuntimeError('Select an A100 80 GB runtime, then reconnect. No training was started.')
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+print('GPU capacity check passed.')
+
+CODE CELL at notebook position 3
+------------------------------------------------------------
+# 2. Configure source data and a PERSISTENT output location.
+IN_COLAB = 'google.colab' in sys.modules
+try:
+    from google.colab import drive
+except ImportError:
+    IN_COLAB = False
+else:
+    IN_COLAB = True
+    drive.mount('/content/drive')
+
+WORK_ROOT = Path('/content/openvla_ur5') if IN_COLAB else Path.cwd() / 'openvla_ur5_work'
+WORK_ROOT.mkdir(parents=True, exist_ok=True)
+# This is the same Drive dataset location used by the previous training notebooks.
+DRIVE_ROOT = Path('/content/drive/MyDrive/VLA_Thesis/Sorted VLA Backup Final/pHYSICAL UR5')
+DATASET_SOURCE_DIR = DRIVE_ROOT / 'datasets/lerobot/ur5_cube_110ep_v3' if IN_COLAB else Path('/workspace/datasets/ur5_cube_110ep_v3')
+DATASET_ARCHIVE = DRIVE_ROOT / 'datasets/lerobot/ur5_cube_110ep_v3.tar' if IN_COLAB else Path('/workspace/datasets/ur5_cube_110ep_v3.tar')
+# For a provider other than Colab, EDIT SAVE_ROOT to its mounted persistent volume.
+SAVE_ROOT = DRIVE_ROOT / 'checkpoints/ur5_openvla_trained' if IN_COLAB else Path('/workspace/persistent/openvla_ur5')
+RUN_NAME = 'ur5_cube_110ep_openvla_lora32_b16_20000_steps_v1'
+OUTPUT = SAVE_ROOT / RUN_NAME
+LOCAL_DATASET = WORK_ROOT / 'ur5_cube_110ep_v3'
+CACHE = WORK_ROOT / 'prepared_base_rgb'
+CODE = WORK_ROOT / 'code'
+VENV = WORK_ROOT / 'env'
+TRAIN_STEPS, BATCH_SIZE, ACCUMULATE, SAVE_EVERY = 20000, 4, 4, 250
+MIN_GPU_MEMORY_GIB = 75
+WANDB_ENTITY = 'mdshafakat-masud-ontario-tech-university'
+WANDB_PROJECT = 'ur5-experiment1-openvla'
+
+required_gib = 20 if (CACHE / 'manifest.json').exists() and VENV.exists() else 100
+if shutil.disk_usage(WORK_ROOT).free < required_gib * 1024**3:
+    raise RuntimeError(f'Need at least {required_gib} GiB free local disk for this setup/resume.')
+SAVE_ROOT.mkdir(parents=True, exist_ok=True)
+print('Dataset folder:', DATASET_SOURCE_DIR)
+print('Alternative dataset archive:', DATASET_ARCHIVE)
+print('Persistent run folder:', OUTPUT)
+print('Verify that SAVE_ROOT survives runtime termination before proceeding.')
+
+CODE CELL at notebook position 4
+------------------------------------------------------------
+[Embedded source extraction cell: run the original notebook cell; encoded archive omitted from this text reference.]
+
+CODE CELL at notebook position 5
+------------------------------------------------------------
+# 4. Create an isolated Python 3.10 environment, including on newer Colab kernels.
+# Kernel packages and existing robot/ML environments are not modified.
+def run(command, env=None, log=None):
+    process = subprocess.Popen([str(x) for x in command], stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True, bufsize=1, env=env)
+    log_file = Path(log).open('a') if log else None
+    try:
+        try:
+            for line in process.stdout:
+                print(line, end='', flush=True)
+                if log_file:
+                    log_file.write(line)
+                    log_file.flush()
+        except KeyboardInterrupt:
+            if process.poll() is None:
+                print('Requesting graceful stop; wait for CHECKPOINT SAVED before closing.')
+                process.send_signal(signal.SIGUSR1)
+                for line in process.stdout:
+                    print(line, end='', flush=True)
+                    if log_file:
+                        log_file.write(line)
+            process.wait()
+            raise
+        status = process.wait()
+        if status:
+            raise RuntimeError(f'Process exited with status {status}; inspect the error above.')
+    finally:
+        if log_file:
+            log_file.close()
+
+BOOTSTRAP = WORK_ROOT / 'bootstrap'
+uv_binary = BOOTSTRAP / 'bin/uv'
+if not uv_binary.exists():
+    run([sys.executable, '-m', 'pip', 'install', '--target', BOOTSTRAP, 'uv==0.9.8'])
+CHILD_ENV = os.environ.copy()
+CHILD_ENV.update({'UV_PYTHON_INSTALL_DIR': str(WORK_ROOT / 'python'),
+                  'UV_CACHE_DIR': str(WORK_ROOT / 'uv_cache'),
+                  'HF_HOME': str(WORK_ROOT / 'hf_cache'),
+                  'TOKENIZERS_PARALLELISM': 'false', 'CUDA_VISIBLE_DEVICES': '0'})
+PYTHON = VENV / 'bin/python'
+if not PYTHON.exists():
+    run([uv_binary, 'python', 'install', '3.10'], env=CHILD_ENV)
+    run([uv_binary, 'venv', '--seed', '--python', '3.10', VENV], env=CHILD_ENV)
+run([uv_binary, 'pip', 'install', '--python', PYTHON,
+     'torch==2.2.2', 'torchvision==0.17.2', '--index-url',
+     'https://download.pytorch.org/whl/cu121'], env=CHILD_ENV)
+run([uv_binary, 'pip', 'install', '--python', PYTHON, '-r', CODE / 'requirements.txt'], env=CHILD_ENV)
+run([PYTHON, '-c',
+     'import torch,transformers,peft,timm,av; '
+     'print("Torch:",torch.__version__,"Transformers:",transformers.__version__); '
+     'assert torch.cuda.is_available() and torch.cuda.is_bf16_supported(); '
+     'print("GPU:",torch.cuda.get_device_name(0))'], env=CHILD_ENV)
+
+CODE CELL at notebook position 6
+------------------------------------------------------------
+# 5. Stage the reviewed dataset on local SSD; verify its actual file hashes.
+import tarfile
+from pathlib import PurePosixPath
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with Path(path).open('rb') as f:
+        for block in iter(lambda: f.read(8*1024**2), b''):
+            h.update(block)
+    return h.hexdigest()
+
+reviewed = json.loads((CODE / 'reviewed_source.json').read_text())
+if not LOCAL_DATASET.exists():
+    staging = WORK_ROOT / ('.staging-' + str(time.time_ns()))
+    staging.mkdir()
+    if DATASET_SOURCE_DIR.is_dir():
+        shutil.copytree(DATASET_SOURCE_DIR, staging / LOCAL_DATASET.name)
+    elif DATASET_ARCHIVE.is_file():
+        # Reject links and paths outside the one expected dataset root.
+        with tarfile.open(DATASET_ARCHIVE, 'r:*') as archive:
+            members = archive.getmembers()
+            for member in members:
+                p = PurePosixPath(member.name)
+                if (not p.parts or p.parts[0] != LOCAL_DATASET.name or
+                    p.is_absolute() or '..' in p.parts or
+                    not (member.isfile() or member.isdir())):
+                    raise ValueError(f'Unsafe or unexpected dataset archive member: {member.name}')
+            archive.extractall(staging, members=members)
+    else:
+        raise FileNotFoundError('Set DATASET_SOURCE_DIR or DATASET_ARCHIVE to the reviewed 110-episode dataset.')
+    (staging / LOCAL_DATASET.name).rename(LOCAL_DATASET)
+    staging.rmdir()
+for i, (relative, expected) in enumerate(reviewed['sha256'].items(), 1):
+    if sha256_file(LOCAL_DATASET / relative) != expected:
+        raise ValueError(f'Source artifact checksum mismatch: {relative}')
+    if i % 10 == 0:
+        print('Verified dataset files:', i, '/', len(reviewed['sha256']))
+print('All reviewed dataset file checksums match.')
+run([PYTHON, CODE / 'prepare_data.py', '--dataset', LOCAL_DATASET, '--cache', CACHE], env=CHILD_ENV)
+
+CODE CELL at notebook position 7
+------------------------------------------------------------
+# 6. Read Colab Secrets. Enable Notebook access in Colab's Secrets panel.
+# Secret names: WANDB_API_KEY (required for online graphs), HF_TOKEN (optional).
+# Values stay in child-process environment variables and are never printed.
+from getpass import getpass
+
+def runtime_secret(name, required=False):
+    existing = CHILD_ENV.get(name, '').strip()
+    if existing:
+        return existing
+    if IN_COLAB:
+        from google.colab import userdata
+        try:
+            value = userdata.get(name).strip()
+        except userdata.SecretNotFoundError:
+            if not required:
+                return ''
+        except userdata.NotebookAccessError:
+            raise RuntimeError(f'Enable Notebook access for {name} in Colab Secrets, then rerun this cell.') from None
+        except userdata.TimeoutException:
+            raise RuntimeError('Run this cell from the Colab notebook UI to access Secrets.') from None
+        else:
+            if value or not required:
+                return value
+    return getpass(f'{name} (hidden; Enter uses existing credentials or skips optional token): ').strip()
+
+key = runtime_secret('WANDB_API_KEY', required=True)
+if key:
+    CHILD_ENV['WANDB_API_KEY'] = key
+del key
+token = runtime_secret('HF_TOKEN')
+if token:
+    CHILD_ENV['HF_TOKEN'] = token
+del token
+run([PYTHON, '-c', 'import wandb; wandb.login(verify=True)'], env=CHILD_ENV)
+print('W&B project: https://wandb.ai/' + WANDB_ENTITY + '/' + WANDB_PROJECT)
+print('Full training will create/resume its own run and print the live run URL.')
+print('Charts include train/loss, train/learning_rate, action-token accuracy, joint MAE and GPU memory.')
+
+CODE CELL at notebook position 8
+------------------------------------------------------------
+# 7. Real memory/update/save test, followed by a fresh-process resume test.
+def training_command(output, probe=False):
+    command = [PYTHON, '-u', CODE / 'train.py', '--cache', CACHE, '--output', output,
+               '--steps', str(TRAIN_STEPS), '--batch-size', str(BATCH_SIZE),
+               '--accumulate', str(ACCUMULATE), '--save-every', str(SAVE_EVERY),
+               '--min-gpu-memory-gib', str(MIN_GPU_MEMORY_GIB),
+               '--wandb-entity', WANDB_ENTITY, '--wandb-project', WANDB_PROJECT]
+    return command + (['--probe'] if probe else [])
+
+PROBE = WORK_ROOT / f'probe_b{BATCH_SIZE}_a{ACCUMULATE}'
+run(training_command(PROBE, probe=True), env=CHILD_ENV)
+first = json.loads((PROBE / 'status.json').read_text())
+if first['phase'] != 'probe_passed' or first['step'] != 2:
+    raise RuntimeError('The two-update probe did not finish.')
+run(training_command(PROBE, probe=True), env=CHILD_ENV)
+second = json.loads((PROBE / 'status.json').read_text())
+if second['phase'] != 'probe_passed' or not second['resume_checkpoint_loaded']:
+    raise RuntimeError('Fresh-process checkpoint resume was not verified.')
+OUTPUT.mkdir(parents=True, exist_ok=True)
+(OUTPUT / 'probe_report.json').write_text(json.dumps(second, indent=2))
+PROBE_PASSED = True
+print('MEMORY, OPTIMIZER UPDATE, CHECKPOINT AND COLD-RESUME CHECKS PASSED.')
+print('If the probe runs out of memory, lower BATCH_SIZE and raise ACCUMULATE to retain batch 16, then repeat.')
+
+CODE CELL at notebook position 9
+------------------------------------------------------------
+# 8. START / RESUME FULL TRAINING. This cell stays active while training runs.
+# A same-name, same-settings run resumes its newest COMPLETE checkpoint automatically.
+# To pause, interrupt this cell ONCE and wait for the graceful checkpoint-save message.
+# Runtime crashes can lose up to 249 updates; existing completed checkpoints remain usable.
+assert PROBE_PASSED, 'Complete the memory and cold-resume probe first.'
+print('Starting original OpenVLA LoRA training on all 110 episodes.')
+print('Use the LIVE W&B URL printed below to view the graphs during this cell.')
+print('Persistent output:', OUTPUT)
+run(training_command(OUTPUT), env=CHILD_ENV, log=OUTPUT / 'terminal.log')
+
+CODE CELL at notebook position 10
+------------------------------------------------------------
+# 9. Inspect completion or pause state and the latest checkpoint.
+state = json.loads((OUTPUT / 'status.json').read_text())
+print(json.dumps(state, indent=2))
+pointer = OUTPUT / 'latest_checkpoint.json'
+if pointer.exists():
+    print('Latest complete checkpoint:', pointer.read_text())
+if state.get('wandb_url'):
+    from IPython.display import display, HTML
+    display(HTML('<a target="_blank" href="' + state['wandb_url'] + '">Open training graphs in W&B</a>'))
+if state['phase'] == 'finished':
+    print('Training is complete. The checkpoint contains a LoRA adapter plus optimizer/RNG state.')
+    print('It is not a standalone merged model; load it with the pinned base model and saved normalization.')
+    print('No robot execution setup was changed. A separate read-only inference check is needed before deployment.')
