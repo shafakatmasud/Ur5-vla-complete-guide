@@ -1,0 +1,175 @@
+ISOLATED Pi0 TESTING — completed 20,000-step UR5 checkpoint
+
+All Pi0 edits go under experiments/pi0/. Original SmolVLA scripts, environments,
+checkpoints, calibration files, README and launch commands remain unchanged.
+Pi0 uses pi0_ur5_runtime and port 8766; SmolVLA retains pi0 and port 8765.
+Only one physical policy/control engine may run at a time on this robot.
+
+Prepared 2026-11-02:
+- Pi0.5 checkpointed/paused at step 15223; GPUs 0–2 released.
+- Robot NORMAL; External Control running; speed reduced to 20%.
+- Both RGB cameras live at 640x480. Arm already at standard pose.
+- Previous idle engine stopped; dedicated Pi0 engine started without bowl rules.
+- Empty gripper opened and both IO writes acknowledged.
+- Full copied checkpoint and processor checksums match the completed export.
+- Five live-camera shadow predictions passed shape, finite-value and engine
+  startup/target-step checks. No arm targets were published for these checks.
+
+This test uses the task "Pick up the orange cube and place it in the bowl".
+UPDATED Pi0 stability profile: learned arm route with arm-only five-sample
+averaging, longer boundary blending, stronger target/velocity filtering and
+20 executed actions per prediction (two seconds at 10 Hz).
+At speed scale 0.5 the engine caps velocity at 0.04 rad/s and acceleration at
+0.10 rad/s^2 per joint. Existing startup, tracking and freshness guards remain.
+
+Gripper supervision now holds the first confirmed CLOSE until the measured tool
+enters the copied fixed-bowl release region, with fresh TF, slow motion and dwell.
+The first arm-validated CLOSE action takes effect immediately, including a
+single 100-ms CLOSE request; it does not need a 300-ms consecutive pulse.
+After acknowledged OPEN there, it stays open and arm targets stop until reset.
+This is an execution guard, not evidence of learned release or object contact.
+A missed first close needs a fresh attempt; automatic grasp retries are blocked.
+Keep the bowl at its taught position. No grasp offset, carry lift or planned
+transport is enabled. SmolVLA originals and its calibration files are unchanged.
+
+1. Every ROS terminal
+
+conda deactivate
+export UR5_VLA_ROOT="/media/grasplab/ed18b0ca-2841-4109-a97f-532234a9abb5/physical-ur5-vla-implementation"
+export PI0_ROOT="$UR5_VLA_ROOT/experiments/pi0"
+source /opt/ros/humble/setup.bash
+source "$UR5_VLA_ROOT/hardware_ws/install/local_setup.bash"
+source "$UR5_VLA_ROOT/ros2_ws/install/local_setup.bash"
+
+No Conda activation is needed for ROS commands. The Pi0 launcher starts its
+own separate ML environment. Leave the existing SmolVLA environment unchanged.
+
+2. COLD START ONLY — driver/MoveIt/cameras are already running now
+
+Do not launch duplicate copies of these services. If starting from a stopped
+workstation, use one terminal per long-running command, after step 1:
+
+ping -c 3 10.0.1.38
+
+ros2 launch ur_robot_driver ur_control.launch.py \
+  ur_type:=ur5 robot_ip:=10.0.1.38 reverse_ip:=10.0.1.42 \
+  launch_rviz:=false initial_joint_controller:=forward_position_controller \
+  activate_joint_controller:=false
+
+Play the saved External Control program on the pendant. Set its speed to 20%.
+
+ros2 launch ur_moveit_config ur_moveit.launch.py \
+  ur_type:=ur5 launch_rviz:=true launch_servo:=true
+
+ros2 launch realsense2_camera rs_launch.py \
+  serial_no:=_044322072365 camera_namespace:=base camera_name:=camera \
+  initial_reset:=true enable_color:=true enable_depth:=true align_depth.enable:=true \
+  rgb_camera.color_profile:=640x480x30 depth_module.depth_profile:=640x480x30
+
+ros2 launch realsense2_camera rs_launch.py \
+  serial_no:=_827312073590 camera_namespace:=wrist camera_name:=camera \
+  initial_reset:=true enable_color:=true enable_depth:=true align_depth.enable:=true \
+  rgb_camera.color_profile:=640x480x30 depth_module.depth_profile:=640x480x30
+
+ros2 control switch_controllers --activate forward_position_controller \
+  --deactivate scaled_joint_trajectory_controller --strict
+ros2 service call /servo_node/stop_servo std_srvs/srv/Trigger '{}'
+
+3. Dedicated Pi0 control engine — already running, start is safe to repeat
+
+Stop any existing policy, teleop mapper and original control engine before
+switching to Pi0. joy_node alone may remain running.
+
+bash "$PI0_ROOT/prepare.sh"
+
+With the scene reset and no object held, this starts the engine and waits for
+fresh joints and Servo-stop acknowledgment before requesting OPEN. It waits
+for both successful IO writes before checking the observation stream. False
+service responses stop startup. Normal policy launches do this automatically.
+
+For a subsequent read-only readiness check:
+
+/usr/bin/python3 "$PI0_ROOT/check.py"
+
+Engine messages in another terminal:
+
+journalctl --user -u ur5-pi0-control-engine.service -f
+
+4. Standard pose — PHYSICAL MOTION; optional now because it is already there
+
+Stop the policy with Ctrl+C first. No object should be held. The command stops
+the Pi0 engine, uses the copied guarded MoveIt-checked standard-pose helper,
+restores the forward controller, stops Servo, restarts the Pi0 engine and opens
+the empty gripper. Failure leaves an error for inspection; do not ignore it.
+
+bash "$PI0_ROOT/standard_pose.sh"
+
+5. Optional repeatable read-only live-camera check
+
+Model-server terminal (no ROS publishers):
+
+bash "$PI0_ROOT/server.sh"
+
+Check terminal:
+
+/usr/bin/python3 "$PI0_ROOT/check.py" --shadow --samples 5
+
+STOP this optional server with Ctrl+C before physical execution. The live
+executor starts and stops its own port-8766 server. Preparation already ran
+this check and stopped its server, so it need not be repeated before test 1.
+
+6. Run a physical Pi0 test — SAME COMMAND EACH ATTEMPT
+
+Place the orange cube in the demonstrated workspace and keep the bowl/cameras
+in their established positions. No object should be held at episode start.
+
+bash "$PI0_ROOT/run.sh"
+
+The wrapper checkpoints/pauses an active Pi0.5 training job and waits for its
+workers to exit before checking GPU availability. Other GPU users are not
+terminated. It then starts/prepares the Pi0 engine before checking gripper
+observations, so a cold engine does not need a pre-existing gripper heartbeat.
+
+Defaults: trained orange-cube instruction, explicit episode preparation, --speed-scale 0.5,
+--actions-per-prediction 20. The first 20 of 50 predicted actions are issued at
+10 Hz with five actions of prefetch; the engine smooths output at 125 Hz.
+The fixed-bowl grasp-hold/release guard described above is active. After its
+release confirmation, verify the actual placement and press Ctrl+C to finish.
+
+Ctrl+C stops the policy and its model server. The engine's command watchdog
+also stops output on disconnect. Use the pendant emergency stop for urgent
+physical stopping. Wait for all old policy processes to exit before another run.
+
+For the next trial: reset the scene, run standard_pose.sh if needed, and run
+the same run.sh command. There is no attempt-number or recording-state gate.
+
+Pi0 terminal logs: experiments/pi0/data/models/evaluation/pi0_tests/
+Read-only check reports: experiments/pi0/data/models/evaluation/pi0_checks/
+These are separate from earlier SmolVLA results. Terminal logs are not a full
+per-attempt telemetry/video recorder or an automatic success score.
+
+7. After Pi0 testing, release its engine / resume Pi0.5 if desired
+
+Stop the Pi0 executor with Ctrl+C, and stop any optional shadow server first.
+
+systemctl --user stop ur5-pi0-control-engine.service
+bash "$PI0_ROOT/resume_pi05.sh"
+systemctl --user status ur5-pi05-training.service --no-pager
+
+Resumption restores the latest complete checkpoint, optimizer/scaler/RNG/data
+position and the same W&B run. To test Pi0 again, run the same run.sh command;
+it requests and waits for a complete training checkpoint/pause automatically.
+
+8. Return to SmolVLA
+
+Stop Pi0 and its engine first. Use your existing original SmolVLA commands from
+the repository's scripts/ directory; they were not modified. Its environment,
+model path, offsets and bowl calibration remain where they were. The original
+engine command observed before this preparation was:
+
+cd "$UR5_VLA_ROOT/scripts"
+/usr/bin/python3 control_engine.py --speed-scale 0.5 \
+  --bowl-release-file "$UR5_VLA_ROOT/data/models/evaluation/codex test analysis/bowl_release_calibration.json"
+
+Run your usual original SmolVLA policy/wrapper in its separate terminal. Keep
+GPU training paused while using GPU 0 for either physical model executor.

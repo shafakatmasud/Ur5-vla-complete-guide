@@ -2492,3 +2492,208 @@ Each attempt is kept in `cross_XX/attempt_YY/`, with `observations.jsonl`,
 change should be recorded as a protocol deviation rather than silently mixed
 with the same baseline. Evaluation files are local ignored data; preserve them
 separately from a source-code Git push.
+
+## Five-model comparison: isolated training and testing
+
+This chapter adds ACT and the completed OpenVLA run without changing the existing
+robot-connection, recording, conversion, SmolVLA or Pi0 commands above. The model
+inventory is [`experiments/models.json`](experiments/models.json). Always keep a
+model's checkpoint, normalizer/processors, source and environment together. Do
+not switch models by replacing `MODEL_PATH` inside another policy's executor.
+
+| Model | Separate source/environment | Checkpoint or training output | Execution status |
+| --- | --- | --- | --- |
+| SmolVLA | Original `scripts/` + ROS package; Conda `pi0` | `data/models/checkpoints/ur5_cube_110ep_v3_smolvla_a100_b128_18000_steps_20261003_180950/pretrained_model` | Existing SmolVLA executor, port 8765 |
+| Pi0 | `experiments/pi0/`; runtime `pi0_ur5_runtime`; training `pi0` | Runtime copy `experiments/pi0/data/models/checkpoints/pi0_20000/pretrained_model` | Existing separate Pi0 executor, port 8766 |
+| Pi0.5 | `experiments/pi05/`; Conda `pi05_ur5` | `data/models/checkpoints/experiment1_pi05_local/ur5_cube_110ep_pi05_expert_20261029_135452/checkpoints/020000/pretrained_model` | 20,000-step checkpoint present; separate live adapter still required |
+| OpenVLA | `experiments/openvla_a100/`; private Colab Python environment | Drive `pHYSICAL UR5/checkpoints/ur5_openvla_trained/ur5_cube_110ep_openvla_lora32_b16_20000_steps_a10040_b16a1_v2/checkpoints/020000` | Completed 20,000 steps; read-only loader available; separate live adapter still required |
+| ACT | `experiments/act/`; `data/models/training_environments/act/env` | `data/models/checkpoints/experiment1_act_local/ur5_cube_110ep_act_b16_c50_20000_steps_v1` | Training 20,000 steps; separate live adapter still required |
+
+Ports 8765 and 8766 are actual configured services. No live service/port is claimed
+for ACT, Pi0.5 or OpenVLA. Their checkpoints cannot be dropped into the SmolVLA
+server. Future execution adapters must live inside the corresponding experiment,
+with their own configuration and calibration copies. The UR5, cameras, ROS
+controllers and GPU cards are shared hardware; use one physical policy at a time.
+The existing control-engine lock also prevents two engines owning the arm.
+
+
+On a fresh Git clone, restore each missing private dependency copy independently
+(the archive is shared only as a distribution file; extracted sources are separate):
+
+```bash
+/usr/bin/python3 "$UR5_VLA_ROOT/experiments/restore_model_sources.py" pi0
+/usr/bin/python3 "$UR5_VLA_ROOT/experiments/restore_model_sources.py" pi05
+```
+
+These commands retain existing folders and do not install dependencies. Use each
+model's recorded environment; runtime checkpoints and calibrations are local
+artifacts and must be copied separately. The bundled source was compared against
+the local Pi0, Pi0.5 and ACT Python source snapshots before publication.
+
+### ACT setup and training, one command at a time
+
+Use the existing `UR5_VLA_ROOT`; commands run in child shells and do not change
+the caller's Conda environment or `PYTHONPATH`. All ACT commands in this section
+perform training or read-only inspection and do not command the robot.
+
+```bash
+export UR5_VLA_ROOT="/media/grasplab/ed18b0ca-2841-4109-a97f-532234a9abb5/physical-ur5-vla-implementation"
+
+# One-time setup: independent dependency environment, frozen source and dataset copy.
+bash "$UR5_VLA_ROOT/experiments/act/setup.sh"
+
+# Verify actual GPU updates, finite prediction, save, and a separate-process restore.
+bash "$UR5_VLA_ROOT/experiments/act/train.sh" --probe
+bash "$UR5_VLA_ROOT/experiments/act/train.sh" --probe
+
+# Same command to start or resume the fixed ACT run in the background.
+bash "$UR5_VLA_ROOT/experiments/act/start.sh"
+
+systemctl --user status ur5-act-training.service --no-pager
+
+tail -f "$UR5_VLA_ROOT/data/models/checkpoints/experiment1_act_local/ur5_cube_110ep_act_b16_c50_20000_steps_v1/terminal.log"
+
+# Status and checksum verification only; no GPU inference or motion.
+/usr/bin/python3 "$UR5_VLA_ROOT/experiments/act/check.py"
+
+# Save a checkpoint and pause ONLY ACT; wait until its service has exited.
+/usr/bin/python3 "$UR5_VLA_ROOT/experiments/act/pause.py"
+```
+
+The local setup clones installed dependencies into the ACT prefix and installs
+LeRobot only in that copy. Its private source is extracted from the checksummed
+`experiments/act/lerobot_source.tar.gz`, with upstream Apache-2.0 LICENSE included.
+`requirements.lock.txt` records dependency versions. The original dataset is
+copied into `data/models/training_environments/act/dataset/`, then all 50 reviewed
+source-file SHA256 values are verified. ACT owns its own Hugging Face, datasets,
+LeRobot and Torch caches under the same ACT environment root. Model files and
+datasets remain ignored by Git; source code and source archives are published.
+
+ACT uses base+wrist RGB at native 640×480 and 7D robot state. Outputs remain six
+absolute UR5 joint targets in radians plus gripper 0=CLOSED / 1=OPEN. The ResNet18
+backbone starts from ImageNet weights; remaining ACT weights start from scratch.
+The run uses chunk 50 at 20 Hz, action horizon 20, microbatch 16/accumulation 1,
+float32, AdamW 1e-5, KL weight 10, seed 42 and 20,000 optimizer updates. It saves every
+250 steps and retains the newest two complete checkpoints. Checkpoints include
+model/processors, optimizer, RNG states, sample position and file checksums;
+incomplete directories are not eligible for resume. Source/configuration changes
+require a new run or the original matching source. All110 episodes are training
+data, with no held-out validation split. ACT has no language input: it is a
+**task-specific imitation baseline**, not a language-following VLA model.
+
+ACT graphs, including actual learning rate, L1 reconstruction, KL loss, timing
+and memory: [live ACT W&B run](https://wandb.ai/mdshafakat-masud-ontario-tech-university/ur5-experiment1-act/runs/88916732).
+The KL-weighted ACT loss is not numerically comparable with another model's loss.
+
+### GPU separation and commands that refuse resource conflicts
+
+ACT uses physical GPU 2. The wrapper below holds a GPU lock through process exec,
+checks existing memory use, and refuses conflicts without stopping another job.
+Use it for commands sharing GPU cards. Locks are cooperative: commands launched
+outside the wrapper can still compete for the same hardware. Existing unwrapped
+commands retain their existing behavior.
+
+```bash
+# Guard the original Pi0 training command, which uses GPUs 0,1,2.
+/usr/bin/python3 "$UR5_VLA_ROOT/experiments/model_job.py" --gpus 0,1,2 -- \
+  bash "$UR5_VLA_ROOT/scripts/train_experiment1_pi0.sh" --resume \
+  "$UR5_VLA_ROOT/data/models/checkpoints/experiment1_pi0_local/ur5_cube_110ep_pi0_expert_20261019_210719"
+
+# Guard the original Pi0.5 training command. Refuses while ACT owns GPU 2.
+/usr/bin/python3 "$UR5_VLA_ROOT/experiments/model_job.py" --gpus 0,1,2 -- \
+  bash "$UR5_VLA_ROOT/experiments/pi05/train.sh" --resume \
+  "$UR5_VLA_ROOT/data/models/checkpoints/experiment1_pi05_local/ur5_cube_110ep_pi05_expert_20261029_135452"
+
+# Read-only check that adding ACT did not change existing model/helper source files.
+/usr/bin/python3 "$UR5_VLA_ROOT/experiments/check_isolation.py"
+```
+
+The audit manifest records 188 pre-existing source/helper files. ACT setup was
+also checked to leave the original `pi0` environment's LeRobot import pointing
+to its original source. The GPU guard's regression tests verify lock lifetime
+through exec and busy-GPU refusal, using fake GPU queries without hardware:
+
+```bash
+/usr/bin/python3 -m unittest discover -s "$UR5_VLA_ROOT/experiments/tests" -v
+```
+
+### Keep the existing physical test commands assigned to their model
+
+After checking the matching engine, observations, scene and gripper state using
+the earlier physical-execution chapter, launch only the selected executor.
+These commands can move the robot. The optional guard pins SmolVLA toGPU 3 and
+Pi0 toGPU 0 without editing either executor's checkpoint or inference code.
+
+```bash
+# SmolVLA only; keep its original calibration and options.
+/usr/bin/python3 "$UR5_VLA_ROOT/experiments/model_job.py" --gpus 3 -- \
+  /usr/bin/python3 "$UR5_VLA_ROOT/scripts/policy_executor.py" \
+  --grasp-offset-file "$UR5_VLA_ROOT/data/models/evaluation/codex test analysis/offset_calibration.json" \
+  --offset-mode continuous --prepare-episode --speed-scale 0.5 --actions-per-prediction 50
+
+# Pi0 only; its runtime already owns its checkpoint, engine and calibration copies.
+/usr/bin/python3 "$UR5_VLA_ROOT/experiments/model_job.py" --gpus 0 -- \
+  bash "$UR5_VLA_ROOT/experiments/pi0/run.sh"
+```
+
+Stop the previous executor and select the corresponding engine before switching
+models; follow the existing shutdown/reset procedure and secure held objects.
+The original Pi0 launcher can request a Pi0.5 checkpoint pause if that training
+service is active. With the outer GPU guard, an already busyGPU 0 is refused
+before the Pi0 launcher runs. GPU reservation does not arbitrate ROS publishers
+or substitute for the robot's existing control/readiness checks.
+
+ACT, Pi0.5 and OpenVLA physical test commands will be added only after their own
+loading, action semantics, observation mapping, frequency and guarded execution
+have been checked. No robot launch was performed as part of ACT training setup.
+
+### Completed OpenVLA training and reproducible cloud commands
+
+[OpenVLA Colab notebook](https://colab.research.google.com/drive/1Il3wn9rwemNu7tqhpmm2RExiG9wOxOuK)
+and [finished W&B run](https://wandb.ai/mdshafakat-masud-ontario-tech-university/ur5-experiment1-openvla/runs/30396f63).
+Clean self-contained notebook copies are under `notebooks/` for actual A100 40 GB
+and A100 80 GB profiles. Run the 40GB notebook cells in order, retaining its fixed
+run name for resume. Store `WANDB_API_KEY` in Colab Secrets with notebook access;
+`HF_TOKEN` is optional. Secrets are not embedded in these files.
+
+```bash
+# Regenerate the clean cloud notebook from its isolated source.
+/usr/bin/python3 "$UR5_VLA_ROOT/experiments/openvla_a100/build_notebook.py" --gpu-memory-gb 40
+
+# Training/checkpoint loader help; does not command the robot.
+# Run with the OpenVLA notebook's isolated Python environment when loading weights.
+"$PYTHON" "$CODE/load_checkpoint.py" --checkpoint "$CHECKPOINT"
+"$PYTHON" "$CODE/load_checkpoint.py" --checkpoint "$CHECKPOINT" --image "$BASE_RGB_IMAGE"
+```
+
+Here `PYTHON=/content/openvla_ur5/env/bin/python`, `CODE=/content/openvla_ur5/code`,
+`CHECKPOINT` is the complete 020000 checkpoint under the Drive directory in the
+model table, and `BASE_RGB_IMAGE` is an existing saved base-camera RGB image.
+These variables belong to the OpenVLA cloud session, not the ROS terminal.
+The output is a LoRA adapter and must stay with its pinned base-model revision,
+action contract and normalization. It is not a merged standalone model.
+
+Original OpenVLA trained for20,000 steps on A100 40 GB with BF16, LoRA rank 32,
+batch 16, constant LR 0.0005 and 320,000 frame presentations. Runtime was about
+11h20m. Final 1,000-step averages were loss 0.528, exact token accuracy 75.9%, and
+joint MAE 0.00098 rad against quantized labels. These are teacher-forced training
+metrics, not physical task success. It uses base RGB and language, without wrist
+RGB or state. The80GB recipe is a separate notebook, not the hardware used by
+this completed40GB run.
+
+### Comparison protocol for the five policies
+
+Use the same reviewed dataset, task scene, initial poses, cube placements,
+time limit and outcome definitions. Preserve model-specific preprocessing and
+record each model's actual training budget, inputs and normalizations. OpenVLA
+has one camera/no state; the other current recipes use two cameras/state. ACT
+has no language conditioning. This is a comparison of five configured policies,
+not an experiment isolating architecture with every other factor controlled.
+
+Report pickup, retention, carry, release-in-bowl, retries, duration, faults and
+full task success from physical trials. Keep future telemetry in separate
+`data/models/evaluation/<model-id>/` sessions. Preserve all existing evaluation
+data. Record planned transport, offsets, smoothing and gripper rules per trial;
+keep policy-only and assisted completions identifiable. Training losses from
+different objectives cannot rank physical success. This training setup does not
+supply unseen-task success measurements for ACT or OpenVLA.

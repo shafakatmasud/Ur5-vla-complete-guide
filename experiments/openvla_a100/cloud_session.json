@@ -1,0 +1,77 @@
+{
+  "notebook_url": "https://colab.research.google.com/drive/1Il3wn9rwemNu7tqhpmm2RExiG9wOxOuK",
+  "browser_window": "0x2e00017",
+  "gpu": "NVIDIA A100-SXM4-40GB",
+  "memory_mib": 40960,
+  "runtime_work_root": "/content/openvla_ur5",
+  "python": "/content/openvla_ur5/env/bin/python",
+  "status": "Finished 20000/20000; final checkpoint saved and verified per completed Colab output",
+  "wandb_authenticated": true,
+  "dataset_files_sha256_verified": 50,
+  "optimizer_steps": 20000,
+  "profile": {
+    "microbatch": 16,
+    "gradient_accumulation": 1,
+    "effective_batch": 16,
+    "precision": "BF16",
+    "quantization": false
+  },
+  "credentials_stored_in_this_file": false,
+  "batch_benchmarks": [
+    {
+      "microbatch": 4,
+      "accumulate": 4,
+      "peak_allocated_gib": 17.71205711364746,
+      "seconds_per_update": 3.1551101495000466
+    },
+    {
+      "microbatch": 8,
+      "accumulate": 2,
+      "peak_allocated_gib": 20.47196865081787,
+      "seconds_per_update": 2.6226794770000197
+    },
+    {
+      "microbatch": 16,
+      "accumulate": 1,
+      "peak_allocated_gib": 25.849814414978027,
+      "seconds_per_update": 2.3132460919999858
+    }
+  ],
+  "probe_data": "64 cached frames for memory/update/restore diagnostics only; not full training",
+  "cold_resume_probe": "passed for batch 1 x accumulation 16",
+  "last_checked_utc": "2026-11-05T17:27:29.652785+00:00",
+  "full_data_probe": {
+    "phase": "probe_passed",
+    "step": 2,
+    "resume_checkpoint_loaded": "/content/openvla_ur5/probe_b16_a1/checkpoints/000002"
+  },
+  "source_files_match_local": true,
+  "run_name": "ur5_cube_110ep_openvla_lora32_b16_20000_steps_a10040_b16a1_v2",
+  "prior_slow_run": {
+    "phase": "paused",
+    "step": 87,
+    "checkpoint_saved_and_verified": true,
+    "wandb_url": "https://wandb.ai/mdshafakat-masud-ontario-tech-university/ur5-experiment1-openvla/runs/a7e90438"
+  },
+  "wandb_url": "https://wandb.ai/mdshafakat-masud-ontario-tech-university/ur5-experiment1-openvla/runs/30396f63",
+  "last_logged_metrics": {
+    "train/step": 20000,
+    "train/loss": 0.6246680617332458,
+    "train/learning_rate": 0.0005,
+    "train/teacher_forced_action_token_accuracy": 0.7410714285714286,
+    "train/predicted_token_in_action_vocabulary_fraction": 1.0,
+    "train/teacher_forced_joint_mae_rad": 0.0010465670324423734,
+    "train/teacher_forced_gripper_mae": 0.0,
+    "train/gradient_norm_before_clip": 1.2890625,
+    "train/consumed_samples": 320000,
+    "train/seconds_per_optimizer_step": 2.0403404547890003,
+    "train/estimated_remaining_hours": 0.0,
+    "train/gpu_peak_allocated_gib": 25.849814414978027,
+    "train/gpu_peak_reserved_gib": 29.080078125
+  },
+  "full_training_started": true,
+  "last_progress_evidence": "Completed notebook output and W&B Finished dashboard",
+  "wandb_graphs_open": true,
+  "completion_assessment": "assessment_20261105",
+  "final_checkpoint": "/content/drive/MyDrive/VLA_Thesis/Sorted VLA Backup Final/pHYSICAL UR5/checkpoints/ur5_openvla_trained/ur5_cube_110ep_openvla_lora32_b16_20000_steps_a10040_b16a1_v2/checkpoints/020000"
+}

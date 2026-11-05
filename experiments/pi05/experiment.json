@@ -1,0 +1,13 @@
+{
+  "purpose": "Pi0.5 expert training",
+  "created_utc": "2026-10-29T17:59:54.627377+00:00",
+  "environment": "/home/grasplab/miniconda3/envs/pi05_ur5",
+  "lerobot_source": "/media/grasplab/ed18b0ca-2841-4109-a97f-532234a9abb5/physical-ur5-vla-implementation/experiments/pi05/lerobot",
+  "original_smolvla_root": "/media/grasplab/ed18b0ca-2841-4109-a97f-532234a9abb5/physical-ur5-vla-implementation",
+  "smolvla_originals_modified": false,
+  "shared_resources": [
+    "physical robot; one controller and policy publisher at a time",
+    "GPU hardware; pause Pi0.5 before Pi0 inference"
+  ],
+  "model_outputs": "/media/grasplab/ed18b0ca-2841-4109-a97f-532234a9abb5/physical-ur5-vla-implementation/data/models/checkpoints/experiment1_pi05_local"
+}

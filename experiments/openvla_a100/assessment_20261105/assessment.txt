@@ -1,0 +1,65 @@
+OPENVLA EXPERIMENT 1 TRAINING ASSESSMENT — 2026-11-05
+
+Verdict: the requested 20,000-step training completed successfully, with stable,
+continuing improvement in training loss and joint/action-token metrics. It is a
+promising checkpoint for offline prediction review and a controlled physical test.
+These measurements do not establish real robot success or unseen-task generalization.
+
+Source: https://wandb.ai/mdshafakat-masud-ontario-tech-university/ur5-experiment1-openvla/runs/30396f63
+Evidence: downloaded completed Colab notebook, 2,001 logged optimizer batches,
+80 checkpoint-save/verification messages, explicit FINISHED at20,000/20,000,
+and the W&B Finished dashboard. The run contains no traceback or resume message;
+all logged numeric metrics are finite. The final complete checkpoint was reported at:
+/content/drive/MyDrive/VLA_Thesis/Sorted VLA Backup Final/pHYSICAL UR5/checkpoints/ur5_openvla_trained/ur5_cube_110ep_openvla_lora32_b16_20000_steps_a10040_b16a1_v2/checkpoints/020000
+Only the newest two complete checkpoints are retained by the training script.
+
+Recipe: original OpenVLA-7B, pinned base revision, LoRA rank32/all-linear,
+BF16, A10040GB, microbatch16 x accumulation1, constant learning rate0.0005.
+All110 episodes /285,204 frames used for training. Base RGB only; no wrist camera
+or proprioceptive input. Output: six absolute UR5 joint radians plus gripper.
+320,000 sample presentations = 1.122 dataset passes.
+Training-loop duration approximately 11.34 hours,
+averaging 2.040s/update, including periodic saves.
+Peak allocated GPU memory25.85GiB; peak reserved29.08GiB.
+
+Final batch versus final1,000-step average (100 sampled batches):
+Loss: 0.624668 versus 0.528244
+Action-token accuracy: 74.11% versus 75.95%
+Joint MAE: 0.00104657rad versus 0.00098107rad (0.0562degrees)
+Gripper MAE: 0.000000 versus 0.008093
+
+Trajectory: first-batch loss10.86965, token accuracy7.14%, joint MAE0.20030rad.
+The first1,000-step averages were loss2.14654, accuracy33.84%, joint MAE0.01636rad.
+At9,001–10,000 they were loss0.75828, accuracy65.69%, joint MAE0.001735rad.
+At19,001–20,000 they were loss0.52824, accuracy75.95%, joint MAE0.000981rad.
+Compared with9,001–10,000, final-window loss is approximately30.3% lower,
+accuracy is10.3 percentage points higher, and joint MAE approximately43.5% lower.
+Compared with18,001–19,000, final-window loss improves about2.2%: improvement
+continues, but its rate is slowing. Gripper error is not monotonically improving.
+The final single batch is noisier than the final-window mean; a modest final-batch
+loss increase is not evidence of divergence. Gradient norms stay finite; the
+initial large norm was clipped by the configured1.0 maximum before updates.
+
+Interpretation limits:
+1. No held-out validation split: overfitting and generalization cannot be assessed.
+2. Accuracy is exact token agreement, not successful pickup/carry/release rate.
+3. Teacher forcing can be optimistic versus autoregressive live execution.
+4. Joint MAE compares decoded quantized labels; it is not TCP error in millimetres
+   and does not include all quantization/clipping error against raw actions.
+5. Gripper predictions do not measure force, contact, retention or closing timing.
+6. Only the original orange-cube instruction was represented in this training set.
+   This run provides no measured evidence for blue cubes, fruit sorting or two-object tasks.
+7. Original OpenVLA uses base RGB alone. Camera consistency matters; wrist views
+   and measured joints are not model inputs under this recipe.
+
+Recommendation: keep the20,000-step adapter and its pinned base model,
+normalization and action contract together. First review free-running predictions
+on saved episodes, especially gripper transitions and joint-target jumps; then
+perform a separately isolated, slow physical trial with measured task outcomes.
+Do not select more training steps merely from decreasing training loss. Use episode-level
+held-out evaluation and physical tests to decide whether a later training run is needed.
+
+Colab disconnected after training completed. Its notebook autosave reported a
+conflict; this assessment preserves the completed notebook/output locally. The
+checkpoint-save message confirms verification at save time; this review did not
+allocate another GPU or freshly download/re-hash the remote adapter.

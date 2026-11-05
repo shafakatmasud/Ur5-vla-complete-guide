@@ -1,0 +1,43 @@
+{
+  "real_frame_indices_checked": [
+    0,
+    1,
+    2,
+    20,
+    200,
+    1000,
+    2000,
+    2797
+  ],
+  "video": "videos/observation.images.base/chunk-000/file-000.mp4",
+  "processor_revision": "47a0ec7fc4ec123775a391911046cf33cf9ed83f",
+  "model_weights_loaded": false,
+  "gpu_used": false,
+  "dataset_rows_validated": 285204,
+  "input_pixel_shape": [
+    8,
+    6,
+    224,
+    224
+  ],
+  "supervised_tokens_per_example": 8,
+  "status": "passed",
+  "created_utc": "2026-11-04T18:10:00.485676+00:00",
+  "source_file_checksums_verified": 50,
+  "source_size_gib": 7.41,
+  "base_video_frame_count_checks": 29,
+  "unit_tests_passed": 4,
+  "notebook_python_cells_compiled": 9,
+  "embedded_source_checksum_verified": true,
+  "protected_smolvla_files_verified_unchanged": 70,
+  "a100_forward_backward_probe": "Passed on full 285204-frame cache, batch16 x accumulation1",
+  "checkpoint_cold_resume_on_a100": "Passed in fresh process at diagnostic step2 on full cache, batch16 x accumulation1",
+  "remote_training_started": true,
+  "colab_secret_checks": [
+    "value returned without stdout",
+    "optional missing token skipped",
+    "required missing token hidden-input fallback",
+    "access denied gives actionable error"
+  ],
+  "cloud_training_step_verified": 50
+}

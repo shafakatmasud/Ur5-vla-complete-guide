@@ -22,3 +22,11 @@ wandb/
 credentials*
 *.key
 *.pem
+
+experiments/pi0/data/
+
+experiments/pi0/lerobot/
+
+experiments/pi05/lerobot/
+
+experiments/act/lerobot/

@@ -1,0 +1,156 @@
+{
+  "assessed_utc": "2026-11-05T17:27:29.652785+00:00",
+  "run_id": "30396f63",
+  "wandb_url": "https://wandb.ai/mdshafakat-masud-ontario-tech-university/ur5-experiment1-openvla/runs/30396f63",
+  "phase": "finished",
+  "optimizer_steps": 20000,
+  "dataset_episodes": 110,
+  "dataset_frames": 285204,
+  "consumed_samples": 320000,
+  "equivalent_dataset_passes": 1.1220038989635488,
+  "approx_training_loop_hours": 11.33522474882778,
+  "logged_batches": 2001,
+  "checkpoints_saved_and_verified_in_log": 80,
+  "retention_policy_complete_checkpoints": 2,
+  "final_checkpoint_as_reported_at_save": "/content/drive/MyDrive/VLA_Thesis/Sorted VLA Backup Final/pHYSICAL UR5/checkpoints/ur5_openvla_trained/ur5_cube_110ep_openvla_lora32_b16_20000_steps_a10040_b16a1_v2/checkpoints/020000",
+  "final_batch_metrics": {
+    "train/step": 20000,
+    "train/loss": 0.6246680617332458,
+    "train/learning_rate": 0.0005,
+    "train/teacher_forced_action_token_accuracy": 0.7410714285714286,
+    "train/predicted_token_in_action_vocabulary_fraction": 1.0,
+    "train/teacher_forced_joint_mae_rad": 0.0010465670324423734,
+    "train/teacher_forced_gripper_mae": 0.0,
+    "train/gradient_norm_before_clip": 1.2890625,
+    "train/consumed_samples": 320000,
+    "train/seconds_per_optimizer_step": 2.0403404547890003,
+    "train/estimated_remaining_hours": 0.0,
+    "train/gpu_peak_allocated_gib": 25.849814414978027,
+    "train/gpu_peak_reserved_gib": 29.080078125
+  },
+  "windows": [
+    {
+      "from_step": 1,
+      "to_step": 1000,
+      "logged_batches": 101,
+      "mean": {
+        "train/loss": 2.146535605487257,
+        "train/learning_rate": 0.0005,
+        "train/teacher_forced_action_token_accuracy": 0.3384016973125884,
+        "train/predicted_token_in_action_vocabulary_fraction": 1.0,
+        "train/teacher_forced_joint_mae_rad": 0.016355124801281106,
+        "train/teacher_forced_gripper_mae": 0.013698796350223258,
+        "train/gradient_norm_before_clip": 1.255259900990099,
+        "train/seconds_per_optimizer_step": 1.9864287072755562,
+        "train/estimated_remaining_hours": 10.759909907062399,
+        "train/gpu_peak_allocated_gib": 25.845889049001258,
+        "train/gpu_peak_reserved_gib": 29.080078125
+      }
+    },
+    {
+      "from_step": 4001,
+      "to_step": 5000,
+      "logged_batches": 100,
+      "mean": {
+        "train/loss": 1.0319651222229005,
+        "train/learning_rate": 0.0005,
+        "train/teacher_forced_action_token_accuracy": 0.5770535714285714,
+        "train/predicted_token_in_action_vocabulary_fraction": 1.0,
+        "train/teacher_forced_joint_mae_rad": 0.0029988787825537037,
+        "train/teacher_forced_gripper_mae": 0.006848039215686275,
+        "train/gradient_norm_before_clip": 1.1665234375,
+        "train/seconds_per_optimizer_step": 2.0209047745649915,
+        "train/estimated_remaining_hours": 8.698267991812807,
+        "train/gpu_peak_allocated_gib": 25.849814414978027,
+        "train/gpu_peak_reserved_gib": 29.080078125
+      }
+    },
+    {
+      "from_step": 9001,
+      "to_step": 10000,
+      "logged_batches": 100,
+      "mean": {
+        "train/loss": 0.7582848906517029,
+        "train/learning_rate": 0.0005,
+        "train/teacher_forced_action_token_accuracy": 0.656875,
+        "train/predicted_token_in_action_vocabulary_fraction": 1.0,
+        "train/teacher_forced_joint_mae_rad": 0.0017349809178695342,
+        "train/teacher_forced_gripper_mae": 0.003735294117647059,
+        "train/gradient_norm_before_clip": 1.2041015625,
+        "train/seconds_per_optimizer_step": 2.049983308418016,
+        "train/estimated_remaining_hours": 5.976356033688275,
+        "train/gpu_peak_allocated_gib": 25.849814414978027,
+        "train/gpu_peak_reserved_gib": 29.080078125
+      }
+    },
+    {
+      "from_step": 14001,
+      "to_step": 15000,
+      "logged_batches": 100,
+      "mean": {
+        "train/loss": 0.6601630201935769,
+        "train/learning_rate": 0.0005,
+        "train/teacher_forced_action_token_accuracy": 0.6992857142857143,
+        "train/predicted_token_in_action_vocabulary_fraction": 1.0,
+        "train/teacher_forced_joint_mae_rad": 0.0013615466702690492,
+        "train/teacher_forced_gripper_mae": 0.009338235294117647,
+        "train/gradient_norm_before_clip": 1.248671875,
+        "train/seconds_per_optimizer_step": 2.0428477620747403,
+        "train/estimated_remaining_hours": 3.11819348000851,
+        "train/gpu_peak_allocated_gib": 25.849814414978027,
+        "train/gpu_peak_reserved_gib": 29.080078125
+      }
+    },
+    {
+      "from_step": 18001,
+      "to_step": 19000,
+      "logged_batches": 100,
+      "mean": {
+        "train/loss": 0.5399931499361992,
+        "train/learning_rate": 0.0005,
+        "train/teacher_forced_action_token_accuracy": 0.7533928571428572,
+        "train/predicted_token_in_action_vocabulary_fraction": 1.0,
+        "train/teacher_forced_joint_mae_rad": 0.0010469190117901842,
+        "train/teacher_forced_gripper_mae": 0.004980392156862745,
+        "train/gradient_norm_before_clip": 1.273203125,
+        "train/seconds_per_optimizer_step": 2.0409883747766666,
+        "train/estimated_remaining_hours": 0.8475911338048466,
+        "train/gpu_peak_allocated_gib": 25.849814414978027,
+        "train/gpu_peak_reserved_gib": 29.080078125
+      }
+    },
+    {
+      "from_step": 19001,
+      "to_step": 20000,
+      "logged_batches": 100,
+      "mean": {
+        "train/loss": 0.5282442563772202,
+        "train/learning_rate": 0.0005,
+        "train/teacher_forced_action_token_accuracy": 0.7594642857142857,
+        "train/predicted_token_in_action_vocabulary_fraction": 1.0,
+        "train/teacher_forced_joint_mae_rad": 0.0009810656215956575,
+        "train/teacher_forced_gripper_mae": 0.008093137254901961,
+        "train/gradient_norm_before_clip": 1.2526171875,
+        "train/seconds_per_optimizer_step": 2.0406541685009514,
+        "train/estimated_remaining_hours": 0.28059491682831705,
+        "train/gpu_peak_allocated_gib": 25.849814414978027,
+        "train/gpu_peak_reserved_gib": 29.080078125
+      }
+    }
+  ],
+  "logged_metrics_all_finite": true,
+  "tracebacks_in_training_output": 0,
+  "resume_events_in_training_output": 0,
+  "source_notebook_sha256": "ea5c5f3be8f9576465cfce7e850872582a4bc3614afda63013d3d0ac33bd43c5",
+  "validation_split": null,
+  "metric_limits": [
+    "Metrics use teacher forcing, supplying ground-truth preceding action tokens.",
+    "Joint MAE compares decoded quantized predicted and target tokens, not raw unquantized actions.",
+    "Gripper MAE is a continuous decoded-label error, not a grasp/contact/force measure.",
+    "Training frames are temporally correlated; all110 episodes were used for training.",
+    "No held-out or physical success measurements are available for this OpenVLA checkpoint."
+  ],
+  "runtime_status_at_review": "Colab disconnected after finished training; no new GPU runtime was started.",
+  "notebook_backup_reason": "Colab reported notebook autosave conflict with another tab; current completed output was downloaded and preserved locally.",
+  "checkpoint_audit_limit": "Successful checksum verification recorded at checkpoint save; remote files were not freshly downloaded/rehashed during assessment."
+}

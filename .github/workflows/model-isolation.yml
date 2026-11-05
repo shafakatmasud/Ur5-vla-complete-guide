@@ -1,0 +1,16 @@
+name: Model source isolation
+on: [push, pull_request]
+jobs:
+  model-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Verify existing model sources are frozen
+        run: python experiments/check_isolation.py
+      - name: Test GPU reservation without GPU hardware
+        run: python -m unittest discover -s experiments/tests -v
+      - name: Check ACT launcher syntax
+        run: for script in experiments/act/*.sh; do bash -n "$script"; done

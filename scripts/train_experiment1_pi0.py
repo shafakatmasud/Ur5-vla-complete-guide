@@ -50,6 +50,7 @@ def main():
     from lerobot.utils.feature_utils import dataset_to_policy_features
     from lerobot.configs.types import FeatureType
     from pi0_training_recovery import OffsetSampler, sampler_position, restore_optimizer
+    from pi0_amp_step import optimizer_step
 
     rank, local = int(os.environ['RANK']), int(os.environ['LOCAL_RANK'])
     world = int(os.environ['WORLD_SIZE'])
@@ -154,6 +155,8 @@ def main():
         camera_features=list(dataset.meta.camera_keys), missing_camera_slots=1,
         probe=args.probe, started_utc=datetime.now(timezone.utc).isoformat())
     configuration['mixed_precision']=args.mixed_precision
+    configuration['amp_overflow_policy']='Skip optimizer update, lower loss scale, stop after eight consecutive overflows'
+    configuration['step_semantics']='Consumed effective batches; skipped optimizer updates are explicitly logged'
     from importlib.metadata import version
     configuration['versions']={name:version(name) for name in ['torch','lerobot','transformers','wandb']}
     configuration['training_script_sha256']=hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
@@ -209,6 +212,7 @@ def main():
         dist.barrier()
     model.train()
     started=time.monotonic()
+    consecutive_overflows = 0
     for step in range(start_step+1,args.steps+1):
         tick=time.monotonic();optimizer.zero_grad(set_to_none=True)
         loss_sum=torch.zeros((),device=local)
@@ -228,20 +232,21 @@ def main():
             scaler.scale(loss/args.accumulate).backward()
             loss_sum+=loss.detach()/args.accumulate
             per_dim+=torch.tensor(details['loss_per_dim'],device=local)/args.accumulate
-        scaler.unscale_(optimizer)
-        grad=model.clip_grad_norm_(1.)
-        if not torch.isfinite(grad):raise RuntimeError('Non-finite Pi0 gradient norm')
         warmup=min(1000,max(1,args.steps//10))
         fraction=min(1.,step/warmup) if step<=warmup else .1+.9*.5*(1+math.cos(math.pi*(step-warmup)/max(1,args.steps-warmup)))
         for group in optimizer.param_groups:group['lr']=2.5e-5*fraction
-        scaler.step(optimizer)
-        scaler.update()
+        update = optimizer_step(model, optimizer, scaler)
+        consecutive_overflows = consecutive_overflows+1 if update['optimizer_step_skipped'] else 0
+        if consecutive_overflows >= 8:
+            raise RuntimeError('Eight consecutive Pi0 AMP overflows; inspect the data and numerics')
         dist.all_reduce(loss_sum);loss_sum/=world
         dist.all_reduce(per_dim);per_dim/=world
         memory=torch.tensor(torch.cuda.max_memory_allocated()/2**20,device=local)
         dist.all_reduce(memory,op=dist.ReduceOp.MAX)
         if rank==0:
-            metrics={'train/loss':loss_sum.item(),'train/grad_norm':float(grad),
+            metrics={'train/loss':loss_sum.item(),'train/grad_norm':update['grad_norm'],
+                     'train/optimizer_step_skipped':int(update['optimizer_step_skipped']),
+                     'train/loss_scale':update['loss_scale'],
                      'train/learning_rate':optimizer.param_groups[0]['lr'],
                      'train/step_seconds':time.monotonic()-tick,
                      'train/elapsed_seconds':time.monotonic()-started,
@@ -253,6 +258,8 @@ def main():
             # metric records the actual restored optimizer step without dropping logs.
             if run:run.log(metrics,commit=True)
             print(json.dumps(metrics),flush=True)
+            if update['optimizer_step_skipped']:
+                print(f"AMP_OVERFLOW_SKIPPED step={step} scale={update['loss_scale_before']}->{update['loss_scale']}; weights and optimizer moments unchanged", flush=True)
         if not args.probe and (step==1 or step%args.save_every==0 or step==args.steps):checkpoint(step)
     if run:run.finish()
     dist.destroy_process_group()

@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "recorded_date": "2026-11-05",
+  "shared_dataset": "data/dataset/lerobot/ur5_cube_110ep_v3",
+  "models": [
+    {
+      "id": "smolvla",
+      "environment": "/home/grasplab/miniconda3/envs/pi0",
+      "source": "scripts/ and ros2_ws/src/ur5-vla-dataset-recorder",
+      "checkpoint": "data/models/checkpoints/ur5_cube_110ep_v3_smolvla_a100_b128_18000_steps_20261003_180950/pretrained_model",
+      "checkpoint_step": 18000,
+      "input": "base+wrist RGB and state",
+      "inference_port": 8765,
+      "live_executor_available": true,
+      "command": "/usr/bin/python3 \"$UR5_VLA_ROOT/scripts/policy_executor.py\""
+    },
+    {
+      "id": "pi0",
+      "environment": "/home/grasplab/miniconda3/envs/pi0_ur5_runtime",
+      "training_environment": "/home/grasplab/miniconda3/envs/pi0",
+      "source": "experiments/pi0",
+      "checkpoint": "experiments/pi0/data/models/checkpoints/pi0_20000/pretrained_model",
+      "checkpoint_step": 20000,
+      "input": "base+wrist RGB, state and language",
+      "inference_port": 8766,
+      "live_executor_available": true,
+      "command": "bash \"$UR5_VLA_ROOT/experiments/pi0/run.sh\""
+    },
+    {
+      "id": "pi05",
+      "environment": "/home/grasplab/miniconda3/envs/pi05_ur5",
+      "source": "experiments/pi05",
+      "checkpoint": "data/models/checkpoints/experiment1_pi05_local/ur5_cube_110ep_pi05_expert_20261029_135452/checkpoints/020000/pretrained_model",
+      "checkpoint_step": 20000,
+      "input": "base+wrist RGB, state and language",
+      "inference_port": null,
+      "live_executor_available": false,
+      "command": "Training/resume: bash \"$UR5_VLA_ROOT/experiments/pi05/train.sh\" --resume \"$UR5_VLA_ROOT/data/models/checkpoints/experiment1_pi05_local/ur5_cube_110ep_pi05_expert_20261029_135452\""
+    },
+    {
+      "id": "openvla",
+      "environment": "Colab isolated /content/openvla_ur5/env",
+      "source": "experiments/openvla_a100",
+      "checkpoint": "Drive: pHYSICAL UR5/checkpoints/ur5_openvla_trained/ur5_cube_110ep_openvla_lora32_b16_20000_steps_a10040_b16a1_v2/checkpoints/020000",
+      "checkpoint_step": 20000,
+      "input": "base RGB and language only",
+      "inference_port": null,
+      "live_executor_available": false,
+      "command": "notebooks/train_ur5_cube_110ep_openvla_a100_40gb.ipynb",
+      "wandb_url": "https://wandb.ai/mdshafakat-masud-ontario-tech-university/ur5-experiment1-openvla/runs/30396f63"
+    },
+    {
+      "id": "act",
+      "environment": "data/models/training_environments/act/env",
+      "source": "experiments/act",
+      "checkpoint": "data/models/checkpoints/experiment1_act_local/ur5_cube_110ep_act_b16_c50_20000_steps_v1",
+      "checkpoint_step": null,
+      "training_target_step": 20000,
+      "input": "base+wrist RGB640x480 and7D state",
+      "language_conditioned": false,
+      "inference_port": null,
+      "live_executor_available": false,
+      "command": "bash \"$UR5_VLA_ROOT/experiments/act/start.sh\"",
+      "wandb_url": "https://wandb.ai/mdshafakat-masud-ontario-tech-university/ur5-experiment1-act/runs/88916732"
+    }
+  ],
+  "resource_policy": "Separate code/env/checkpoint/cache/log directories; shared GPU hardware protected by cooperative model_job.py locks. The physical robot accepts one model/controller at a time.",
+  "comparison_limits": [
+    "Policy architectures/normalizations/training budgets differ",
+    "OpenVLA uses one camera without state; the others have two cameras and state",
+    "ACT does not condition on language",
+    "Report planned placement, offsets and gripper overrides per execution condition",
+    "Training losses are not directly comparable task-success measurements"
+  ]
+}

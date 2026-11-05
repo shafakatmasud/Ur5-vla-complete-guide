@@ -1,0 +1,60 @@
+ISOLATED ACT — EXPERIMENT1
+
+Use the existing UR5_VLA_ROOT variable. Run scripts with bash; do not source them.
+All commands below are training or file inspection. None commands the robot.
+
+Prepare private environment, bundled LeRobot source, and dataset copy:
+  bash "$UR5_VLA_ROOT/experiments/act/setup.sh"
+
+Real update/save test, then cold-process resume test (same command twice):
+  bash "$UR5_VLA_ROOT/experiments/act/train.sh" --probe
+  bash "$UR5_VLA_ROOT/experiments/act/train.sh" --probe
+
+Start/resume the fixed ACT run in its own background user service:
+  bash "$UR5_VLA_ROOT/experiments/act/start.sh"
+  systemctl --user status ur5-act-training.service --no-pager
+
+Inspect logs and W&B URL:
+  tail -f "$UR5_VLA_ROOT/data/models/checkpoints/experiment1_act_local/ur5_cube_110ep_act_b16_c50_20000_steps_v1/terminal.log"
+  cat "$UR5_VLA_ROOT/data/models/checkpoints/experiment1_act_local/ur5_cube_110ep_act_b16_c50_20000_steps_v1/wandb_run.json"
+
+Read-only status/checkpoint checksum inspection:
+  /usr/bin/python3 "$UR5_VLA_ROOT/experiments/act/check.py"
+
+Checkpoint and pause ONLY ACT (wait for status phase paused before resuming):
+  /usr/bin/python3 "$UR5_VLA_ROOT/experiments/act/pause.py"
+
+After the old service exits, resume with the same start.sh command above.
+For a foreground resume of the original run:
+  bash "$UR5_VLA_ROOT/experiments/act/train.sh" --resume "$UR5_VLA_ROOT/data/models/checkpoints/experiment1_act_local/ur5_cube_110ep_act_b16_c50_20000_steps_v1"
+
+Recipe: original LeRobot ACT; two native640x480 RGB cameras + seven-dimensional
+state; six absolute UR5 joint targets in radians and gripper0closed/1open.
+ImageNet ResNet18 backbone; remaining ACT weights trained from scratch.
+Chunk50 at20Hz; configured action horizon20. CVAE KL weight10, AdamW1e-5,
+float32, microbatch16/accumulation1,20000 updates,seed42,save every250,
+retain last2 complete checkpoints. All110 episodes used; no held-out split.
+ACT has no language input; compare as a task-specific imitation baseline.
+
+Private environment/caches/dataset:
+  data/models/training_environments/act/
+Private source:
+  experiments/act/lerobot/ (generated from checksummed bundled archive)
+Outputs, optimizer/RNG state and metrics:
+  data/models/checkpoints/experiment1_act_local/
+W&B project:
+  https://wandb.ai/mdshafakat-masud-ontario-tech-university/ur5-experiment1-act
+
+ACT reserves physical GPU2 through experiments/model_job.py. It refuses an
+already reserved/busy GPU; it never kills or pauses another model. Wrap Pi0.5
+training with model_job.py --gpus 0,1,2, as shown in the main README, to prevent
+overlap. GPU locks are cooperative; arbitrary commands bypassing the wrapper
+are outside that guarantee. No inference port or physical ACT executor exists
+yet; implement/test an isolated adapter before future physical ACT trials.
+
+Existing SmolVLA/Pi0/Pi0.5/OpenVLA sources and commands are unchanged. The
+dataset copy is checked against50 reviewed source-file SHA256 values. The
+original dataset and other model environments are not modified by ACT setup.
+requirements.lock.txt records the cloned environment; the source archive
+includes its upstream Apache-2.0 LICENSE. Setup targets this workstation's
+existing pi0 dependency environment, but installs only into the ACT copy.

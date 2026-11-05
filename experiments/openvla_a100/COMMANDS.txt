@@ -1,0 +1,62 @@
+OPENVLA — ISOLATED A100 CLOUD TRAINING
+
+Prepared notebook:
+notebooks/train_ur5_cube_110ep_openvla_a100_80gb.ipynb
+
+Upload that notebook to the GPU notebook service and run the cells in order.
+Cell 2 configures the existing dataset location and PERSISTENT output folder.
+The notebook embeds its own source; no repository upload is needed.
+The 80 GB notebook requires an actual A100 80 GB. For the connected Colab
+A100 40 GB use notebooks/train_ur5_cube_110ep_openvla_a100_40gb.ipynb.
+The 40 GB profile uses microbatch 16 x accumulation 1 = effective batch 16.
+A real two-update probe fit at 25.85 GiB allocated / 29.08 GiB reserved.
+Both profiles require their own full-data update/checkpoint/resume probe.
+In Colab Secrets add WANDB_API_KEY and optionally HF_TOKEN, then enable
+Notebook access for those secrets. Cell 6 reads them without printing values.
+If the W&B secret is absent, a hidden-input prompt is available.
+
+Default run: original OpenVLA-7B, one base RGB camera, no proprioception input,
+LoRA rank 32/alpha 16/all-linear, BF16, microbatch 4 x accumulation 4 = batch 16,
+constant learning rate 5e-4, 20,000 optimizer steps, save every 250 steps.
+Only the last two COMPLETE checkpoints are retained.
+All 110 episodes / 285,204 frames are training data, with no held-out split.
+Seven action labels remain absolute joint radians + binary gripper command.
+This is not the two-camera/proprioceptive OpenVLA-OFT variant.
+
+To pause: interrupt the training cell ONCE, then wait for its checkpoint message.
+To resume: use the same RUN_NAME and settings; rerun the notebook setup and
+training cells. Adapter, optimizer, scheduler, RNG states and sample position
+are restored automatically from the newest checksum-verified checkpoint.
+The source snapshot/signature must also match; do not edit code mid-run.
+
+W&B project:
+https://wandb.ai/mdshafakat-masud-ontario-tech-university/ur5-experiment1-openvla
+The training process prints the exact live run link after initialization.
+Learning rate is logged explicitly. The default schedule is constant.
+Loss/action accuracy/joint MAE are teacher-forced training diagnostics.
+They are not physical task-success measurements.
+
+The trained checkpoint is a LoRA ADAPTER, not a merged standalone model.
+Keep it with its normalization and action-contract files and pinned base model.
+Read-only inspection in the notebook-created Python environment:
+  "$PYTHON" "$CODE/load_checkpoint.py" --checkpoint "$CHECKPOINT"
+Optional read-only prediction from a saved base-camera frame:
+  "$PYTHON" "$CODE/load_checkpoint.py" --checkpoint "$CHECKPOINT" --image "$BASE_RGB_IMAGE"
+None of these scripts publish commands or change robot execution.
+
+Local data/checkpoint logic tests (existing Python environment, no installation):
+  /home/grasplab/miniconda3/envs/pi0/bin/python -m unittest discover -s experiments/openvla_a100/tests -v
+
+Rebuild the self-contained notebook after editing its source:
+  python3 experiments/openvla_a100/build_notebook.py
+
+CLOUD SESSION: optimized training started on 2026-11-04. Both full-data
+optimizer updates and cold checkpoint restore passed before launch.
+Run: ur5_cube_110ep_openvla_lora32_b16_20000_steps_a10040_b16a1_v2
+A100 40 GB; batch16 x accumulation1; 20,000 steps.
+Live W&B: https://wandb.ai/mdshafakat-masud-ontario-tech-university/ur5-experiment1-openvla/runs/30396f63
+See cloud_session.json for the latest verified progress.
+The initial slow batch1/acc16 run remains paused with a verified step87
+checkpoint in its separate a10040_v1 folder; the optimized run starts fresh.
+Local tests verify source data, real base RGB/processor/action token alignment,
+normalization, deterministic sampling and incomplete/corrupt checkpoint handling.
